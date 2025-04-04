@@ -1,4 +1,5 @@
 phidata
+agno
 python-dotenv
 yfinance
 packaging
