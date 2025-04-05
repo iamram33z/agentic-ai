@@ -1,0 +1,1 @@
+[{"text": "Sample policy document content. In production, this would be extracted from the PDF.", "source": "company_policies.pdf", "type": "policy"}, {"text": "Sample product updates. In production, this would be parsed from the CSV.", "source": "latest_updates.csv", "type": "product_update"}]

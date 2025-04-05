@@ -1,0 +1,281 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FinTech AI Assistant</title>
+    <link rel="stylesheet" href="static/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+</head>
+<body>
+<div class="app-container">
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo-container">
+                <div class="logo-icon">
+                    <i class="fas fa-chart-network"></i>
+                </div>
+                <span class="logo-text">FinTech AI</span>
+            </div>
+            <div class="status-indicator">
+                <span class="status-dot"></span>
+                <span class="status-text">Online</span>
+            </div>
+        </div>
+
+        <div id="client-id-section" class="client-id-input">
+            <h3 class="section-title">Client Identification</h3>
+            <form id="client-form">
+                <input type="text" id="client-id-input" placeholder="Enter Client ID" required>
+                <button type="submit" id="client-submit-btn">
+                    <i class="fas fa-arrow-right"></i>
+                </button>
+            </form>
+        </div>
+
+        <div id="portfolio-summary" style="display: none;">
+            <h3 class="section-title">Your Portfolio</h3>
+            <div class="portfolio-value">
+                <span class="value" id="portfolio-total-value">$0.00</span>
+                <span class="label" id="portfolio-risk-profile">No Risk Profile</span>
+            </div>
+            <div class="holdings-chart">
+                <div class="chart-visual" id="portfolio-chart">
+                    <!-- Chart segments will be added here -->
+                </div>
+                <div class="chart-legend" id="portfolio-legend">
+                    <!-- Legend items will be added here -->
+                </div>
+            </div>
+        </div>
+
+        <div class="quick-actions">
+            <h3 class="section-title">Quick Actions</h3>
+            <button class="action-btn analyze-portfolio">
+                <i class="fas fa-chart-pie"></i> Analyze Portfolio
+            </button>
+            <button class="action-btn market-news">
+                <i class="fas fa-newspaper"></i> Market News
+            </button>
+            <button class="action-btn risk-assessment">
+                <i class="fas fa-shield-alt"></i> Risk Assessment
+            </button>
+        </div>
+
+        <div class="user-profile">
+            <div class="avatar">
+                <i class="fas fa-user-tie"></i>
+            </div>
+            <div class="user-info">
+                <span class="username" id="client-name">Financial Advisor</span>
+                <span class="user-plan">Professional Plan</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-content">
+        <div class="chat-container">
+            <div class="chat-header">
+                <h2><i class="fas fa-robot"></i> FinTech AI Assistant</h2>
+                <div class="typing-indicator" id="typing-indicator">
+                    <span>Analyzing</span>
+                    <div class="typing-dots">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chat-messages" id="chat-messages">
+                {% for message in chat_history %}
+                <div class="message {{ message.role }}-message">
+                    <div class="message-avatar">
+                        {% if message.role == 'user' %}
+                        <i class="fas fa-user"></i>
+                        {% else %}
+                        <i class="fas fa-robot"></i>
+                        {% endif %}
+                    </div>
+                    <div class="message-content">
+                        <div class="message-info">
+                            <span class="sender">{{ "You" if message.role == "user" else "Assistant" }}</span>
+                            <span class="timestamp">{{ message.timestamp }}</span>
+                        </div>
+                        {% if message.role == 'assistant' %}
+                        <div class="message-text">{{ message.content|safe }}</div>
+                        {% else %}
+                        <div class="message-text">{{ message.content }}</div>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+
+            <div class="chat-input">
+                <form id="chat-form" method="post" action="/ask">
+                    <input type="hidden" name="session_id" value="{{ session_id }}">
+                    <input type="hidden" name="chat_history" value="{{ chat_history|tojson }}">
+                    <input type="text" name="question" id="message-input"
+                           placeholder="Ask about stocks, portfolio, or market trends..." required>
+                    <button type="submit" id="send-button">
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </form>
+                <div class="input-hints">
+                    <span>Try: </span>
+                    <span class="hint">"Analyze my TSLA stocks"</span>
+                    <span class="hint">"Portfolio review"</span>
+                    <span class="hint">"Market news"</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const chatForm = document.getElementById('chat-form');
+    const clientForm = document.getElementById('client-form');
+    const messageInput = document.getElementById('message-input');
+    const chatMessages = document.getElementById('chat-messages');
+    const typingIndicator = document.getElementById('typing-indicator');
+    const portfolioSection = document.getElementById('portfolio-summary');
+    const clientIdSection = document.getElementById('client-id-section');
+
+    // Auto-scroll to bottom
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    // Handle client ID submission
+    clientForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const clientId = document.getElementById('client-id-input').value.trim();
+        if (!clientId) return;
+
+        const sessionId = "{{ session_id }}";
+        const formData = new FormData();
+        formData.append('client_id', clientId);
+        formData.append('session_id', sessionId);
+
+        try {
+            const response = await fetch('/set-client', {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                // Update UI with portfolio data
+                updatePortfolioUI(data.portfolio);
+
+                // Hide client ID input and show portfolio
+                clientIdSection.style.display = 'none';
+                portfolioSection.style.display = 'block';
+
+                // Enable chat
+                messageInput.disabled = false;
+            } else {
+                alert('Error: ' + (data.error || 'Unknown error'));
+            }
+        } catch (error) {
+            alert('Network error: ' + error.message);
+        }
+    });
+
+    function updatePortfolioUI(portfolio) {
+        // Update portfolio summary
+        document.getElementById('portfolio-total-value').textContent =
+            `$${portfolio.portfolio_value.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+        document.getElementById('portfolio-risk-profile').textContent = portfolio.risk_profile;
+        document.getElementById('client-name').textContent = portfolio.name;
+
+        // Update chart
+        const chart = document.getElementById('portfolio-chart');
+        chart.innerHTML = '';
+
+        const legend = document.getElementById('portfolio-legend');
+        legend.innerHTML = '';
+
+        portfolio.holdings.forEach((holding, index) => {
+            // Add chart segment
+            const segment = document.createElement('div');
+            segment.className = 'chart-segment';
+            segment.style.width = `${holding.allocation}%`;
+            segment.style.backgroundColor = `hsl(${index * 60}, 70%, 60%)`;
+            chart.appendChild(segment);
+
+            // Add legend item
+            const legendItem = document.createElement('div');
+            legendItem.className = 'legend-item';
+            legendItem.innerHTML = `
+                <span class="legend-color" style="background-color: hsl(${index * 60}, 70%, 60%);"></span>
+                <span class="legend-text">${holding.symbol} (${holding.allocation.toFixed(1)}%)</span>
+            `;
+            legend.appendChild(legendItem);
+        });
+    }
+
+    // Handle chat form submission
+    chatForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const formData = new FormData(chatForm);
+        const question = formData.get('question');
+
+        if (!question.trim()) return;
+
+        // Show typing indicator
+        typingIndicator.style.display = 'flex';
+
+        try {
+            const response = await fetch('/ask', {
+                method: 'POST',
+                body: formData
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                // Reload the page with updated history
+                window.location.reload();
+            } else {
+                alert('Error: ' + (data.error || 'Unknown error'));
+            }
+        } catch (error) {
+            alert('Network error: ' + error.message);
+        } finally {
+            typingIndicator.style.display = 'none';
+        }
+    });
+
+    // Quick action buttons
+    document.querySelectorAll('.action-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            let question = '';
+
+            if (btn.classList.contains('analyze-portfolio')) {
+                question = "Analyze my portfolio and provide recommendations";
+            } else if (btn.classList.contains('market-news')) {
+                question = "What's the latest market news that affects my portfolio?";
+            } else if (btn.classList.contains('risk-assessment')) {
+                question = "Perform a risk assessment on my current portfolio";
+            }
+
+            if (question) {
+                messageInput.value = question;
+                chatForm.dispatchEvent(new Event('submit'));
+            }
+        });
+    });
+
+    // Disable chat input until client ID is provided
+    messageInput.disabled = {% if portfolio %}false{% else %}true{% endif %};
+});
+</script>
+</body>
+</html>

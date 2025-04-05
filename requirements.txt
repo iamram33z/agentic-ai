@@ -13,4 +13,9 @@ sentence-transformers
 psycopg2-binary
 pandas
 PyPDF2
-betterstack
+fastapi
+Faker
+psycopg2-binary
+numpy
+beautifulsoup4
+markdown
