@@ -7,3 +7,10 @@ duckduckgo-search
 fastapi
 uvicorn
 groq
+streamlit
+faiss-cpu
+sentence-transformers
+psycopg2-binary
+pandas
+PyPDF2
+betterstack
