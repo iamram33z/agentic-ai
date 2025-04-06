@@ -6,8 +6,8 @@ from dotenv import load_dotenv
 from agno.agent import Agent
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.yfinance import YFinanceTools
-from azure_postgres import AzurePostgresClient
-from faiss_db import FAISSVectorStore
+from azure_postgres import AzurePostgresClient # Assuming this class exists and is importable
+from faiss_db import FAISSVectorStore         # Assuming this class exists and is importable
 from agno.models.groq import Groq
 from agno.exceptions import ModelProviderError
 from agno.run.response import RunResponse
@@ -18,7 +18,7 @@ from utils import (
     summarize_financial_data,
     estimate_token_count,
     generate_error_html,
-    generate_warning_html,  # Import warning html
+    generate_warning_html,
     log_execution_time,
     validate_portfolio_data, validate_query_text
 )
@@ -30,7 +30,6 @@ import time # Import time
 
 load_dotenv()
 # Use the configured logger from utils
-# Note: Logger name consistency helps if multiple modules use the same name
 logger = get_logger("agent")
 
 # Define constants for context limits (adjust as needed)
@@ -51,16 +50,13 @@ class FinancialAgents:
             logger.info("FinancialAgents system initialized successfully")
         except Exception as e:
             logger.critical(f"Failed to initialize FinancialAgents: {str(e)}", exc_info=True)
-            # Re-raise as a runtime error to be caught by the caller
             raise RuntimeError(f"Failed to initialize financial agents system") from e
 
     def _initialize_agents(self) -> Dict[str, Agent]:
         """Initialize all specialized agents with proper configurations"""
         try:
-            # Model configuration (check specific model context limits and capabilities)
-            # Using Llama3.1 70B as an example - ensure it's available via Groq
-            # Context window size is crucial for the coordinator
-            MODEL_ID_LLAMA3_3_70B = "llama-3.3-70b-versatile" # Example ID
+            # Model configuration
+            MODEL_ID_LLAMA3_3_70B = "llama-3.3-70b-versatile" # Example ID - Check Groq availability
             MODEL_ID_LLAMA3_8B = "llama-3.1-8b-instant"     # Faster, smaller context alternative
 
             model_config = {
@@ -82,7 +78,7 @@ class FinancialAgents:
                  'coordinator': {
                      'id': MODEL_ID_LLAMA3_3_70B, # Use powerful model for coordination
                      'temperature': 0.2,
-                     'max_tokens': 4000 # Max output tokens (input context is the primary limit)
+                     'max_tokens': 4000 # Max output tokens
                  }
             }
 
@@ -93,7 +89,6 @@ class FinancialAgents:
                 key_financial_ratios=True,
                 analyst_recommendations=False # Keep false by default
             )
-            # Corrected DuckDuckGoTools initialization
             duckduckgo_tools = DuckDuckGoTools()
 
 
@@ -115,7 +110,7 @@ If no highly relevant news is found, return ONLY the text: 'No significant marke
                 },
                 'financial': {
                     'name': "Financial Analyst",
-                    'role': "Fetch key financial metrics for specific stock symbols.",
+                    'role': "Fetch key financial metrics for specific stock symbols. Handle cases where metrics (like P/E) might not apply (e.g., crypto) by stating 'N/A'.",
                     'model': Groq(id=model_config['financial']['id'],
                                   temperature=model_config['financial']['temperature'],
                                   max_tokens=model_config['financial']['max_tokens']),
@@ -129,7 +124,7 @@ If no highly relevant news is found, return ONLY the text: 'No significant marke
 | 52-Wk Range     | Low - High |
 | Beta            |            |
 
-Format Market Cap clearly (e.g., $1.2T, $500B, $10B, $500M). Format 52-Wk Range like '100.50 - 250.75'. If a specific data point (like P/E) is unavailable, state 'N/A'. If the symbol is not found or all data is unavailable, return ONLY the text: 'Financial data not available for [symbol]'.""",
+Format Market Cap clearly (e.g., $1.2T, $500B, $10B, $500M). Format 52-Wk Range like '100.50 - 250.75'. If a specific data point (like P/E) is unavailable or not applicable for the asset type, state 'N/A'. If the symbol is not found or all data is unavailable, return ONLY the text: 'Financial data not available for [symbol]'.""",
                     'markdown': True
                 },
                 'recommendation': {
@@ -161,14 +156,14 @@ If data is insufficient for a meaningful recommendation, state ONLY: 'Insufficie
                 model=Groq(id=model_config['coordinator']['id'],
                            temperature=model_config['coordinator']['temperature'],
                            max_tokens=model_config['coordinator']['max_tokens']),
-                team=list(agents.values()), # Team definition might still be useful for some agent frameworks
+                team=list(agents.values()),
                 instructions="""Synthesize the provided information into a coherent report answering the user's query. Use clear MARKDOWN formatting.
 
 Structure:
 1.  **Executive Summary:** (1-2 sentences) Directly answer the user's core question (e.g., buy/sell opinion, analysis summary) based *only* on the provided inputs.
 2.  **Analysis Context:**
     * **Market News:** Briefly mention relevant news from the provided summary, or state 'No significant relevant news found.'
-    * **Financial Data:** Summarize key highlights from the provided financial data tables for the symbols discussed.
+    * **Financial Data:** Summarize key highlights from the provided financial data tables/messages for the symbols discussed. Mention any symbols where data retrieval failed.
     * **Knowledge Base:** Briefly mention relevant insights from the provided document context, if any.
 3.  **Client Portfolio Context** (If client data was provided):
     * Briefly relate the analysis to the client's holdings (e.g., "Your portfolio holds X% in NVDA"). Mention risk profile if relevant. Use only the provided holdings list.
@@ -197,7 +192,6 @@ Structure:
         try:
             if not validate_query_text(query): # Use validation util
                 logger.warning(f"Invalid query received: '{query}'")
-                # Use generate_warning_html or similar from utils if available
                 return generate_warning_html("Invalid Query", "Please provide a more specific question (3-1500 characters).")
 
             logger.info(f"Processing query for client '{client_id or 'generic'}': '{query[:100]}...'")
@@ -214,11 +208,12 @@ Structure:
             # Estimate token count and log warning if high
             estimated_tokens = estimate_token_count(prompt_string)
             logger.info(f"Estimated token count for coordinator prompt: ~{estimated_tokens}")
-            # Adjust threshold based on the coordinator model's actual limit (e.g., 8k, 32k, 128k)
-            # Example for an 8k model limit:
-            if estimated_tokens > 7800: # Leave some buffer
-                 logger.warning(f"Prompt token estimate ({estimated_tokens}) is very high, approaching context limit (~8k).")
-                 # Optionally, return a warning immediately or try to shorten further if possible
+            # Adjust threshold based on coordinator model limit (e.g., 8k, 32k, 128k)
+            # Example for llama-3.3-70b might be > 30k or > 60k? Check model specs. Assume 60k limit for now.
+            MODEL_CONTEXT_LIMIT = 60000 # Example, adjust based on actual model
+            if estimated_tokens > (MODEL_CONTEXT_LIMIT - 2000): # Leave buffer
+                 logger.warning(f"Prompt token estimate ({estimated_tokens}) is high, approaching context limit (~{MODEL_CONTEXT_LIMIT}).")
+                 # Optionally return warning or try shortening
 
             # Call the coordinator agent
             response = self._get_coordinator_response(prompt_string)
@@ -231,13 +226,19 @@ Structure:
             error_details = str(e)
             logger.error(f"Model provider error during response generation: {error_details}", exc_info=True)
             # Specific handling for context length exceeded
-            if "context_length_exceeded" in error_details.lower() or (hasattr(e, 'code') and e.code == 400): # Check code if available
-                final_token_estimate = estimate_token_count(prompt_string) # Recalculate for log msg
+            # Groq might use 400 for context length, check error details more specifically
+            if "context_length_exceeded" in error_details.lower() or \
+               (hasattr(e, 'code') and e.code == 400 and "maximum context length" in error_details.lower()):
+                final_token_estimate = estimate_token_count(prompt_string) # Recalculate
                 logger.error(f"Context Length Exceeded for coordinator. Final estimated tokens: ~{final_token_estimate}")
                 return generate_error_html(
                     "Request Too Complex",
                     f"The analysis generated too much context (~{final_token_estimate} tokens) for the AI model. Please try simplifying your request (e.g., fewer stocks, more specific question)."
                  )
+            elif hasattr(e, 'code') and e.code == 400 and "tool_use_failed" in error_details.lower():
+                 # This specific error is handled within _get_market_data, but if it somehow propagates up
+                 logger.error(f"Tool use failure error reached get_response: {error_details}")
+                 return generate_error_html("AI Tool Error", f"The AI failed to use its financial data tools correctly. Details: {error_details}")
             else: # Other model errors (rate limits, API issues)
                 logger.error(f"Failed Prompt Snippet (Model Error):\n{prompt_string[:500]}...")
                 return generate_error_html("AI Model Error", f"The AI model encountered an issue. Please try again. Details: {error_details}")
@@ -317,7 +318,7 @@ Structure:
                 for h in holdings_data:
                      if isinstance(h, dict):
                         value = h.get('current_value', 0)
-                        if isinstance(value, (int, float)): calculated_total_value += value
+                        if isinstance(value, (int, float)): calculated_total_value += float(value) # Ensure float
             # Determine final portfolio value
             if isinstance(db_total_value, (int, float)) and db_total_value > 0:
                  portfolio['portfolio_value'] = float(db_total_value)
@@ -349,7 +350,6 @@ Structure:
              raise RuntimeError("Coordinator agent not available.")
         logger.debug(f"Sending prompt to coordinator. Length: {len(formatted_prompt_string)} chars, Est. Tokens: ~{estimate_token_count(formatted_prompt_string)}")
         try:
-            # Using run() for simpler handling, assuming final response doesn't need streaming
             response_obj = coordinator.run(formatted_prompt_string)
             if isinstance(response_obj, RunResponse):
                 return response_obj.content # Extract content string
@@ -383,6 +383,7 @@ Structure:
         """Builds context dict: client data, summarized/truncated agent results, documents."""
         context_dict = {'client': client_context, 'market_data_summary': None, 'news_summary': None, 'relevant_documents': None, 'original_query': query}
         client_id_log = client_context.get('id', 'generic') if client_context else 'generic'
+
         # 1. Vector Store Search & Truncation
         try:
              retrieved_docs_text = self.vector_store.search(query)
@@ -392,28 +393,39 @@ Structure:
                   if doc_tokens > MAX_DOC_TOKENS_IN_PROMPT:
                        logger.warning(f"Truncating relevant documents from ~{doc_tokens} to ~{MAX_DOC_TOKENS_IN_PROMPT} tokens.")
                        # Simple truncation (improve if possible)
-                       chars_limit = MAX_DOC_TOKENS_IN_PROMPT * 4
+                       chars_limit = MAX_DOC_TOKENS_IN_PROMPT * 4 # Approx chars based on token heuristic
                        context_dict['relevant_documents'] = retrieved_docs_text[:chars_limit].strip() + "..."
                   else: context_dict['relevant_documents'] = retrieved_docs_text
              else: logger.info("No relevant documents found.")
         except Exception as e:
              logger.error(f"Vector store search failed for client {client_id_log}: {e}", exc_info=True)
-             context_dict['relevant_documents'] = "Error retrieving documents."
+             context_dict['relevant_documents'] = "⚠️ Error retrieving documents." # Keep concise for prompt
+
         # 2. Symbol Extraction
         portfolio_symbols = self._get_portfolio_symbols(client_context)
         combined_text = query + " " + portfolio_symbols
         symbols = self._extract_symbols(combined_text)
-        symbols_to_fetch = symbols[:5] # Limit symbols
+        # Limit symbols to fetch to avoid excessive API calls/context
+        MAX_SYMBOLS_TO_FETCH = 5
+        symbols_to_fetch = symbols[:MAX_SYMBOLS_TO_FETCH]
+        if len(symbols) > MAX_SYMBOLS_TO_FETCH:
+            logger.warning(f"Too many symbols extracted ({len(symbols)}), limiting market data fetch to first {MAX_SYMBOLS_TO_FETCH}: {symbols_to_fetch}")
+
         # 3. Financial Data Fetching & Summarization
         if symbols_to_fetch:
             logger.info(f"Fetching market data for symbols: {symbols_to_fetch}")
-            market_data_raw = self._get_market_data(symbols_to_fetch)
-            summarized_market_data = [summarize_financial_data(r, MAX_FINANCIAL_DATA_SUMMARY_LEN) if isinstance(r, str) and not r.startswith("⚠️") else r for r in market_data_raw]
+            market_data_raw = self._get_market_data(symbols_to_fetch) # Returns list of strings/errors
+            # Summarize only successful results, pass errors through
+            summarized_market_data = [
+                summarize_financial_data(r, MAX_FINANCIAL_DATA_SUMMARY_LEN) if isinstance(r, str) and not r.startswith("⚠️") else r
+                for r in market_data_raw
+            ]
             context_dict['market_data_summary'] = summarized_market_data
-            logger.debug(f"Summarized market data: {summarized_market_data}")
+            logger.debug(f"Summarized market data results: {summarized_market_data}")
         else:
              logger.info("No symbols identified for market data fetching.")
              context_dict['market_data_summary'] = ["No specific stock symbols identified."]
+
         # 4. News Fetching & Summarization
         logger.info("Fetching news summary...")
         try:
@@ -431,9 +443,15 @@ Structure:
                           else:
                                context_dict['news_summary'] = content_str
                           logger.debug(f"News summary received: {context_dict['news_summary'][:100]}...")
-                     else: logger.info("News agent returned no significant news.") # news_summary remains None
-                else: logger.warning(f"News agent returned invalid/empty response: {type(news_response)}")
-            else: logger.error("News agent not initialized.")
+                     else:
+                         logger.info("News agent returned no significant news.") # news_summary remains None
+                         context_dict['news_summary'] = None # Explicitly set to None
+                else:
+                    logger.warning(f"News agent returned invalid/empty response: {type(news_response)}")
+                    context_dict['news_summary'] = "⚠️ News retrieval agent gave invalid response."
+            else:
+                logger.error("News agent not initialized.")
+                context_dict['news_summary'] = "⚠️ News retrieval module unavailable."
         except Exception as e:
             logger.error(f"News agent query failed for client {client_id_log}: {e}", exc_info=True)
             context_dict['news_summary'] = f"⚠️ Error retrieving news." # Keep it concise for prompt
@@ -455,26 +473,41 @@ Structure:
         if not financial_agent:
              logger.error("Financial agent not initialized.")
              return [f"⚠️ Error: Financial analysis module unavailable."] * len(symbols)
+
         for symbol in symbols:
-            # Optional: time.sleep(0.1) # Small delay?
+            time.sleep(0.2) # *** ADDED: Small delay between calls ***
             try:
                 logger.info(f"Requesting financial data for symbol: {symbol}")
                 query = f"Get summary financial data table for {symbol}"
                 response_obj = financial_agent.run(query) # Expect RunResponse
+
                 if isinstance(response_obj, RunResponse) and response_obj.content:
                     content_str = str(response_obj.content).strip()
                     if f"Financial data not available for {symbol}" in content_str or not content_str:
                          logger.warning(f"Financial agent reported no data for {symbol}.")
                          market_data_results.append(f"⚠️ Data not available for symbol: {symbol}")
                     else:
-                        prefix = f"**{symbol}**:\n" # Add symbol prefix for clarity
-                        if not content_str.strip().startswith(("|", "**", symbol)):
+                        # Add symbol prefix if not already present for clarity
+                        prefix = f"**{symbol}**:\n"
+                        if not content_str.strip().startswith(("|", "**", f"{symbol}:")): # Check if prefix/table needed
                              market_data_results.append(prefix + content_str)
                         else: market_data_results.append(content_str)
                         logger.debug(f"Successfully retrieved data for {symbol}.")
                 else:
                     logger.warning(f"Financial agent empty/invalid response for {symbol}: {type(response_obj)}")
                     market_data_results.append(f"⚠️ No valid data received for symbol: {symbol}")
+
+            except ModelProviderError as e:
+                 # *** ADDED: Specific handling for tool_use_failed ***
+                 error_details = str(e).lower()
+                 if hasattr(e, 'code') and e.code == 400 and "tool_use_failed" in error_details:
+                     logger.error(f"Tool use failed for {symbol}: {e}", exc_info=True) # Log full error
+                     market_data_results.append(f"⚠️ Tool execution failed for {symbol}")
+                 else:
+                     # General ModelProviderError handling
+                     logger.error(f"ModelProviderError from financial agent for {symbol}: {e}", exc_info=True)
+                     market_data_results.append(f"⚠️ Error retrieving data for {symbol} (AI Model Error)")
+
             except requests.exceptions.HTTPError as e:
                 status = e.response.status_code if e.response is not None else 'N/A'
                 user_msg = f"⚠️ Error retrieving data for {symbol} (Network Error: {status})"
@@ -482,12 +515,11 @@ Structure:
                 elif status == 429: user_msg = f"⚠️ Error retrieving data for {symbol} (Rate Limit)"
                 logger.warning(f"HTTP error for {symbol}: Status {status}", exc_info=True)
                 market_data_results.append(user_msg)
-            except ModelProviderError as e:
-                 logger.error(f"ModelProviderError from financial agent for {symbol}: {e}", exc_info=True)
-                 market_data_results.append(f"⚠️ Error retrieving data for {symbol} (AI Model Error)")
+
             except Exception as e:
                 logger.error(f"Unexpected error getting data for {symbol}: {e}", exc_info=True)
                 market_data_results.append(f"⚠️ Unexpected error retrieving data for {symbol}")
+
         return market_data_results
 
     @log_execution_time
@@ -495,6 +527,7 @@ Structure:
         """Constructs the final prompt string for the coordinator agent."""
         prompt_parts = ["Please analyze the following information and answer the user's query."]
         prompt_parts.append("\n---\n")
+
         # --- Client Context ---
         client_context = context_dict.get('client')
         if client_context:
@@ -512,26 +545,60 @@ Structure:
                 if len(holdings) > MAX_HOLDINGS_IN_PROMPT: prompt_parts.append(f"  - ... (and {len(holdings) - MAX_HOLDINGS_IN_PROMPT} more)")
             else: prompt_parts.append("- Current Holdings: None")
             prompt_parts.append("\n---\n")
+
         # --- Query ---
         prompt_parts.append("**User's Query**")
         prompt_parts.append(f"```\n{context_dict.get('original_query', 'N/A')}\n```")
         prompt_parts.append("\n---\n")
+
         # --- News ---
         if context_dict.get('news_summary'):
             prompt_parts.append("**Recent Market News Summary**")
             prompt_parts.append(context_dict['news_summary'])
             prompt_parts.append("\n---\n")
+        else:
+             # Indicate if news retrieval failed or returned nothing significant
+             if context_dict.get('news_summary') is None:
+                  prompt_parts.append("**Recent Market News Summary**")
+                  prompt_parts.append("No significant market-moving news found relevant to the query or retrieval failed.")
+                  prompt_parts.append("\n---\n")
+
         # --- Market Data ---
-        if context_dict.get('market_data_summary'):
+        market_data_summary = context_dict.get('market_data_summary')
+        if market_data_summary:
             prompt_parts.append("**Requested Market Data Summary**")
-            prompt_parts.extend([f"- {data_item}" for data_item in context_dict['market_data_summary']])
+            # Handle case where it might just contain the "No symbols" message
+            if isinstance(market_data_summary, list) and len(market_data_summary) == 1 and "No specific stock symbols identified" in market_data_summary[0]:
+                 prompt_parts.append(market_data_summary[0])
+            elif isinstance(market_data_summary, list):
+                 # Iterate and format, ensuring proper handling of potential error strings
+                 for data_item in market_data_summary:
+                      # Check if it's an error message, keep it as is
+                      if isinstance(data_item, str) and data_item.startswith("⚠️"):
+                           prompt_parts.append(f"- {data_item}")
+                      # Otherwise, format as bullet point (assuming it's summarized data)
+                      elif isinstance(data_item, str):
+                           prompt_parts.append(f"- {data_item.strip()}") # Ensure no extra whitespace
+                      else:
+                           prompt_parts.append(f"- Error: Unexpected data format received - {type(data_item)}")
+            else:
+                # Fallback if it's not a list (shouldn't happen with current logic)
+                prompt_parts.append(str(market_data_summary))
+
             prompt_parts.append("\n---\n")
+
         # --- Documents ---
         if context_dict.get('relevant_documents'):
             prompt_parts.append("**Context from Knowledge Base (Excerpt)**")
-            prompt_parts.append(context_dict['relevant_documents'])
+            # Check for error message from vector store
+            if isinstance(context_dict['relevant_documents'], str) and context_dict['relevant_documents'].startswith("⚠️"):
+                 prompt_parts.append(context_dict['relevant_documents'])
+            else:
+                 prompt_parts.append(f"```\n{context_dict['relevant_documents']}\n```") # Put text in code block
             prompt_parts.append("\n---\n")
-        prompt_parts.append("Please provide a comprehensive analysis and response based *only* on the information above. Include the standard investment disclaimer.")
+
+        prompt_parts.append("Please provide a comprehensive analysis and response based *only* on the information above. Follow the structure defined in your instructions and include the standard investment disclaimer.")
+
         final_prompt = "\n".join(prompt_parts)
         logger.debug(f"Final prompt built. Length: {len(final_prompt)} chars, Est. Tokens: ~{estimate_token_count(final_prompt)}")
         return final_prompt
@@ -540,12 +607,12 @@ Structure:
         """Extracts potential financial symbols from text."""
         if not text: return []
         # Using a simplified regex approach for common patterns
-        # Pattern for potential stock/ETF symbols (1-5 uppercase letters)
+        # Pattern for potential stock/ETF symbols (1-5 uppercase letters) - Avoid matching inside words
         stock_pattern = r'\b([A-Z]{1,5})\b'
-        # Pattern for crypto pairs (e.g., BTC-USD, ETH/BTC) - adjust as needed
+        # Pattern for crypto pairs (e.g., BTC-USD, ETH/BTC) - more robust
         crypto_pattern = r'\b([A-Z]{2,6}[-/][A-Z]{2,6})\b'
-        # Pattern for prefixed symbols ($AAPL, ^GSPC)
-        prefix_pattern = r'[$^.]([A-Z0-9.]+)\b' # Allow . for indices like .DJI
+        # Pattern for prefixed symbols ($AAPL, ^GSPC, .DJI)
+        prefix_pattern = r'[$^.]([A-Z0-9\.]{1,10})\b' # Allow . and numbers, increased length
 
         symbols = set()
         proc_text = text.upper() # Process in uppercase
@@ -557,14 +624,18 @@ Structure:
                       # Simplify symbol extraction (handle tuples if groups are complex)
                       symbol = match[0] if isinstance(match, tuple) else match
                       # Basic cleaning/validation
-                      symbol = symbol.strip('.') # Remove leading/trailing dots if captured
-                      if symbol and len(symbol) <= 10: # Basic length check
+                      symbol = symbol.strip('.') # Remove leading/trailing dots if captured by prefix pattern incorrectly
+                      if symbol and len(symbol) <= 15: # Allow slightly longer symbols (e.g., crypto, indices)
                            symbols.add(symbol)
              except re.error as e: logger.error(f"Regex error: {e}")
 
         common_words = self._load_common_words()
         # Filter out common words and standalone numbers
-        filtered_symbols = {s for s in symbols if s and s not in common_words and not s.isdigit()}
+        # Keep crypto pairs even if parts are common words (e.g., ETH-USD)
+        filtered_symbols = {
+            s for s in symbols
+            if s and not s.isdigit() and ('-' not in s and '/' not in s and s not in common_words) or ('-' in s or '/' in s)
+        }
 
         final_list = sorted(list(filtered_symbols))
         logger.info(f"Extracted symbols: {final_list}")
@@ -573,7 +644,7 @@ Structure:
     def _load_common_words(self) -> set:
          """Loads a set of common English words to filter potential symbols."""
          # Load from a file or use the extensive list provided previously
-         # Example subset:
+         # Example subset + added words:
          words = {
              'A', 'I', 'IS', 'IT', 'BE', 'TO', 'DO', 'GO', 'ME', 'MY', 'NO', 'OF', 'ON', 'OR', 'SO', 'UP', 'US', 'WE',
              'ALL', 'AND', 'ANY', 'ARE', 'ASK', 'BUY', 'CAN', 'DAY', 'DID', 'DOW', 'FOR', 'GET', 'HAS', 'HAD', 'HOW',
@@ -605,8 +676,10 @@ Structure:
              'PLEASE', 'ANALYZE', 'SHOULD', 'BASED', 'CONTEXT', 'CURRENT', 'CLIENT', 'QUERY', 'REPORT', 'SUMMARY',
              'HOLDINGS', 'VALUE', 'PROFILE', 'MARKET', 'RECENTLY', 'COMPARE', 'PERFORMANCE', 'FINANCIAL',
              'METRIC', 'RATIO', 'RECOMMENDATION', 'ACTIONABLE', 'ANALYSIS', 'OVERVIEW', 'SYSTEM', 'RESPONSE',
-             'OBJECT', 'CONTENT', 'ERROR', 'MESSAGE', 'WARNING', 'FAILED', 'CLIENT', 'CONTEXT', 'INVALID'
-             # Add more common words or finance terms that aren't symbols
+             'OBJECT', 'CONTENT', 'ERROR', 'MESSAGE', 'WARNING', 'FAILED', 'CLIENT', 'CONTEXT', 'INVALID',
+             # *** ADDED/CONFIRMED WORDS ***
+             'IDEA', 'GOOD', 'BAD', 'INVEST', 'ADD', 'MORE', 'INTO', 'CHECK', 'LOOK', 'STOCK', 'PRICE', 'SHARES',
+             'USD' # *** ADDED USD ***
          }
          return words
 
@@ -629,7 +702,7 @@ if __name__ == "__main__":
         print("\nResponse 2:\n", response2)
         print("-" * 30)
 
-        query3 = "Based on my aggressive profile, is adding more SOXX a good idea?"
+        query3 = "Based on my aggressive profile, is adding more SOXX a good idea? Also look at ETH-USD."
         client_context_sim = {
             "id": "CLIENT_TEST_007", "name": "Client Test 007", "risk_profile": "Aggressive",
             "portfolio_value": 250000.00,
