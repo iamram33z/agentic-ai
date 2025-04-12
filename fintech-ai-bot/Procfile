@@ -1,0 +1,1 @@
+web: streamlit run fintech-ai-bot/app/main.py

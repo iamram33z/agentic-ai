@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fintech-ai-bot"
+version = "0.1.0"
+description = "AI-powered financial advisor bot"
+readme = "README.md"
+requires-python = ">=3.9" # Adjust as needed
+license = { file = "License" }
+authors = [
+    { name = "Rameez M Rassdeen", email = "iamrameez97@gmail.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License", # Or your chosen license
+    "Operating System :: OS Independent",
+    "Development Status :: 3 - Alpha", # Or appropriate status
+    "Intended Audience :: Developers",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    # List core dependencies from requirements.txt here
+    "streamlit >= 1.20", # Example version
+    "python-dotenv",
+    "pydantic",
+    "pydantic-settings",
+    "psycopg2-binary", # Or psycopg2 if compiling
+    "requests",
+    "agno", # Replace with actual library name if different
+    "faiss-cpu", # Or faiss-gpu
+    "numpy",
+    "markdown",
+    "beautifulsoup4", # If still used in formatting
+    "faker", # For data generation script
+    # Add other direct dependencies
+    "phidata",
+    "python-dotenv",
+    "groq"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff", # Example linter/formatter
+    # Add other development tools
+]
+
+[project.scripts]
+# If you want a command-line entry point (optional)
+# fintech-bot = "fintech_ai_bot.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/iamram33z/agentic-ai" # Example
+Repository = "https://github.com/iamram33z/agentic-ai" # Example
+
+[tool.setuptools.packages.find]
+where = ["src"] # Look for packages in src
+
+[tool.ruff]
+# Example ruff configuration (optional)
+line-length = 100
+select = ["E", "W", "F", "I", "UP", "C", "B"] # Example rule selection
+ignore = ["E501"] # Example ignore specific rules
