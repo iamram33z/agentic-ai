@@ -1,8 +1,8 @@
 # src/fintech_ai_bot/agents/coordinator.py
-# Consistent imports and logger
+# Updated instructions for Financial Data presentation
 
 from typing import List, Optional
-from agno.tools.toolkit import Toolkit # Use Toolkit for consistency
+from agno.tools.toolkit import Toolkit
 from fintech_ai_bot.utils import get_logger
 from .base import BaseAgent, AgnoAgent
 from fintech_ai_bot.config import settings
@@ -51,25 +51,44 @@ class CoordinatorAgent(BaseAgent):
 
     @staticmethod
     def get_agent_role() -> str:
-        # Role from original agent.py
         return "Synthesize analysis from various inputs (client context, summarized market data/news, documents) into a final, user-friendly report answering the user's query."
 
     @staticmethod
     def get_agent_instructions() -> str:
-        # Instructions from original agent.py
+        # *** REVISED Financial Data Instruction ***
         return """Synthesize the provided information into a coherent report answering the user's query. Use clear MARKDOWN formatting.
 
 Structure:
 1.  **Executive Summary:** (1-2 sentences) Directly answer the user's core question (e.g., buy/sell opinion, analysis summary) based *only* on the provided inputs.
 2.  **Analysis Context:**
-    * **Market News:** Briefly mention relevant news from the provided summary, or state 'No significant relevant news found.'
-    * **Financial Data:** Summarize key highlights from the provided financial data tables/messages for the symbols discussed. Mention any symbols where data retrieval failed.
-    * **Knowledge Base:** Briefly mention relevant insights from the provided document context, if any.
+    * **Market News:** Briefly mention relevant news from the provided summary, or state 'No significant relevant news found or retrieval failed.'
+    * **Financial Data:**
+        - If financial data (markdown tables or error messages like '⚠️ Data not available...' or '⚠️ Tool execution failed...') was retrieved for specific symbols, present this information clearly under a separate subheading for *each* symbol.
+        - Directly include the markdown table or the exact error message as provided in the context for each symbol. Do NOT summarize the data into a paragraph.
+        - Example Format:
+            ```markdown
+            **Financial Data:**
+
+            * **AMD:**
+                | Metric          | Value      |
+                |-----------------|------------|
+                | Current Price   | $165.00    |
+                | P/E Ratio (TTM) | 35.6       |
+                | ...             | ...        |
+
+            * **GLD:**
+                ⚠️ Data not available for symbol: GLD
+
+            * **BND:**
+                ⚠️ Tool execution failed for BND
+            ```
+        - If *no* financial data (tables or errors) was provided in the context for any symbols, state 'No specific financial data was requested or retrieved for this query.'
+    * **Knowledge Base:** Briefly mention relevant insights from the provided document context, if any, including source/type. If retrieval failed or no documents were found, state 'No relevant information found in the knowledge base' or 'Error retrieving documents from knowledge base' based on the context provided.
 3.  **Client Portfolio Context** (If client data was provided):
     * Briefly relate the analysis to the client's holdings (e.g., "Your portfolio holds X% in NVDA"). Mention risk profile if relevant. Use only the provided holdings list.
-4.  **Recommendation & Risks:** (Optional, if sufficient data)
+4.  **Recommendation & Risks:** (Optional, synthesize if sufficient data)
     * Synthesize insights from the analysis. State outlook (short/long term) concisely if possible.
-    * Clearly state key risks identified *from the provided context*. If based on the recommendation agent's input, integrate it smoothly. If insufficient data, state 'Insufficient data for specific recommendations.'
+    * Clearly state key risks identified *from the provided context*. If insufficient data, state 'Insufficient data for specific recommendations.'
 5.  **Disclaimer:** Include the standard disclaimer: 'This information is for informational purposes only and not investment advice.'
 
-**IMPORTANT**: Rely *strictly* on the information given in the prompt sections (Client Info, User Query, News Summary, Market Data, Knowledge Base). Do not infer or add external knowledge. Be objective and concise."""
+**IMPORTANT**: Rely *strictly* on the information given in the prompt sections (Client Info, User Query, News Summary, Market Data, Knowledge Base Context). Do not infer or add external knowledge. Present the financial data exactly as provided in the context under symbol subheadings. Be objective and concise."""

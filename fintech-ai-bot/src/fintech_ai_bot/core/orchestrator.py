@@ -1,5 +1,5 @@
 # src/fintech_ai_bot/core/orchestrator.py
-# No major changes needed based on agent reversions, ensure imports are correct
+# Final Corrected Version (incorporating holding aggregation)
 
 from typing import Dict, Optional, List, Any
 import time
@@ -32,15 +32,22 @@ class AgentOrchestrator:
     """Orchestrates the interaction between various AI agents, data sources, and the user."""
 
     def __init__(self, db_client: PostgresClient, vector_store_client: Optional[FAISSClient]):
+        """
+        Initializes the orchestrator.
+
+        Args:
+            db_client: An initialized PostgresClient instance.
+            vector_store_client: An initialized FAISSClient instance, or None if failed.
+        """
         self.db_client = db_client
-        self.vector_store_client = vector_store_client
+        self.vector_store_client = vector_store_client # Can be None
         self.agents: Dict[str, BaseAgent] = self._initialize_agents()
         logger.info("Agent Orchestrator initialized.")
 
     def _initialize_agents(self) -> Dict[str, BaseAgent]:
         """Initializes and returns a dictionary of all required agents."""
         try:
-            financial_agent = FinancialAgent() # Now uses original init/instructions
+            financial_agent = FinancialAgent() # Uses reverted init/instructions
             news_agent = NewsAgent()
             agents_dict = {
                 'financial': financial_agent,
@@ -54,51 +61,84 @@ class AgentOrchestrator:
             logger.critical(f"Failed to initialize one or more agents: {e}", exc_info=True)
             raise RuntimeError("Core agent initialization failed.") from e
 
-    # _process_db_portfolio, _prepare_client_context, _extract_symbols,
-    # _load_common_words methods remain the same as the last correct version...
-
+    # --- Updated Portfolio Processing Method ---
     def _process_db_portfolio(self, client_id: str, raw_portfolio: dict) -> Optional[dict]:
-        """Processes raw portfolio data from DB into the standard context format."""
+        """
+        Processes raw portfolio data from DB into the standard context format,
+        AGGREGATING holdings by symbol.
+        """
         try:
             portfolio = {
                 "id": client_id,
                 "name": f"Client {client_id[-4:]}" if len(client_id) >= 4 else f"Client {client_id}",
                 "risk_profile": raw_portfolio.get('risk_profile', 'Not specified') or 'Not specified',
                 "portfolio_value": float(raw_portfolio.get('total_value', 0.0)),
-                "holdings": [],
+                "holdings": [], # This will store the FINAL aggregated holdings
                 "last_update": raw_portfolio.get('last_updated', time.strftime("%Y-%m-%d %H:%M:%S"))
             }
-            holdings_data = raw_portfolio.get('holdings', [])
-            total_val = portfolio['portfolio_value']
 
-            if isinstance(holdings_data, list):
-                for holding in holdings_data:
-                    if not isinstance(holding, dict) or not holding.get('symbol'): continue
+            holdings_data_raw = raw_portfolio.get('holdings', [])
+            total_portfolio_value = portfolio['portfolio_value']
+            aggregated_holdings = {} # Use a dict to aggregate: {symbol: total_value}
+
+            if isinstance(holdings_data_raw, list):
+                for holding in holdings_data_raw:
+                    if not isinstance(holding, dict) or not holding.get('symbol'):
+                        logger.warning(f"Skipping invalid raw holding item for client {client_id}: {holding}")
+                        continue
                     symbol = str(holding['symbol']).strip().upper()
-                    if not symbol: continue
+                    if not symbol:
+                        logger.warning(f"Skipping raw holding item with empty symbol for client {client_id}.")
+                        continue
                     value = holding.get('current_value', 0.0)
-                    if not isinstance(value, (int, float)): value = 0.0
+                    if not isinstance(value, (int, float)):
+                        logger.warning(f"Invalid value type for symbol {symbol} in client {client_id}. Skipping value.")
+                        value = 0.0
                     else: value = float(value)
-                    allocation = (value / total_val * 100) if total_val > 0 else 0.0
-                    portfolio['holdings'].append({"symbol": symbol, "value": value, "allocation": allocation})
+                    # Add or update the aggregated value for the symbol
+                    aggregated_holdings[symbol] = aggregated_holdings.get(symbol, 0.0) + value
 
-            if validate_portfolio_data(portfolio):
+            # Calculate Allocations and Finalize Holdings List
+            if total_portfolio_value > 0: # Avoid division by zero
+                for symbol, total_value_for_symbol in aggregated_holdings.items():
+                    allocation = (total_value_for_symbol / total_portfolio_value * 100)
+                    portfolio['holdings'].append({
+                        "symbol": symbol,
+                        "value": round(total_value_for_symbol, 2), # Store aggregated value
+                        "allocation": round(allocation, 1) # Store calculated allocation
+                    })
+            else: # Handle zero portfolio value case
+                 for symbol, total_value_for_symbol in aggregated_holdings.items():
+                      portfolio['holdings'].append({
+                          "symbol": symbol,
+                          "value": round(total_value_for_symbol, 2),
+                          "allocation": 0.0 # Allocation is 0 if total value is 0
+                      })
+
+            # Sort final aggregated holdings list by value
+            portfolio['holdings'].sort(key=lambda x: x['value'], reverse=True)
+
+            # Final validation before returning
+            if validate_portfolio_data(portfolio): # Use imported util
+                logger.debug(f"Successfully processed and aggregated portfolio for client {client_id}")
                 return portfolio
             else:
-                 logger.error(f"Processed portfolio FAILED validation for client {client_id}.")
+                 logger.error(f"Processed & Aggregated portfolio FAILED validation for client {client_id}.")
                  return None
+
         except Exception as e:
-            logger.error(f"Error processing raw portfolio for {client_id}: {e}", exc_info=True)
+            logger.error(f"Error processing/aggregating raw portfolio for {client_id}: {e}", exc_info=True)
             return None
+    # -----------------------------------------
 
     def _prepare_client_context(self, client_id: Optional[str], client_context_from_ui: Optional[dict]) -> Optional[dict]:
         """Loads, validates, and prepares client context dictionary."""
         logger.debug(f"Preparing client context. Provided ID: {client_id}, UI Context: {client_context_from_ui is not None}")
         final_context = None
-        current_client_id = validate_client_id(client_id)
+        current_client_id = validate_client_id(client_id) # Use imported util
 
         if client_context_from_ui and isinstance(client_context_from_ui, dict):
-            if validate_portfolio_data(client_context_from_ui):
+            if validate_portfolio_data(client_context_from_ui): # Use imported util
                 context_id = client_context_from_ui.get('id')
                 logger.info(f"Using validated client context from UI for client: {context_id or 'ID_MISSING'}")
                 final_context = client_context_from_ui
@@ -114,12 +154,13 @@ class AgentOrchestrator:
             try:
                 raw_portfolio_data = self.db_client.get_client_portfolio(current_client_id)
                 if raw_portfolio_data:
+                    # Call the updated processing function
                     processed_data = self._process_db_portfolio(current_client_id, raw_portfolio_data)
                     if processed_data:
-                        logger.info(f"Successfully fetched and validated portfolio from DB for {current_client_id}")
+                        logger.info(f"Successfully fetched and aggregated portfolio from DB for {current_client_id}")
                         final_context = processed_data
                     else:
-                        logger.warning(f"Processing/validation of DB portfolio for {current_client_id} failed.")
+                        logger.warning(f"Processing/aggregation of DB portfolio for {current_client_id} failed.")
                 else:
                     logger.warning(f"No portfolio data found in DB for client {current_client_id}.")
             except Exception as e:
@@ -144,11 +185,13 @@ class AgentOrchestrator:
                     if symbol and len(symbol) <= 15: symbols.add(symbol)
             except re.error as e: logger.error(f"Regex error: {e}")
         common_words = self._load_common_words()
+        # Added 'TODAY' to common words based on logs
         filtered_symbols = {s for s in symbols if s and not s.isdigit() and ('-' not in s and '/' not in s and s not in common_words) or ('-' in s or '/' in s)}
         final_list = sorted(list(filtered_symbols)); logger.info(f"Extracted symbols: {final_list}"); return final_list
 
     def _load_common_words(self) -> set:
          """Loads a set of common English words to filter potential symbols."""
+         # Keeping the extensive set defined previously, added TODAY
          words = {
              'A', 'I', 'IS', 'IT', 'BE', 'TO', 'DO', 'GO', 'ME', 'MY', 'NO', 'OF', 'ON', 'OR', 'SO', 'UP', 'US', 'WE',
              'ALL', 'AND', 'ANY', 'ARE', 'ASK', 'BUY', 'CAN', 'DAY', 'DID', 'DOW', 'FOR', 'GET', 'HAS', 'HAD', 'HOW',
@@ -180,11 +223,10 @@ class AgentOrchestrator:
              'METRIC', 'RATIO', 'RECOMMENDATION', 'ACTIONABLE', 'ANALYSIS', 'OVERVIEW', 'SYSTEM', 'RESPONSE',
              'OBJECT', 'CONTENT', 'ERROR', 'MESSAGE', 'WARNING', 'FAILED', 'CLIENT', 'CONTEXT', 'INVALID',
              'IDEA', 'GOOD', 'BAD', 'INVEST', 'ADD', 'MORE', 'INTO', 'CHECK', 'LOOK', 'STOCK', 'PRICE', 'SHARES',
-             'USD', 'QUIT', 'RACE', 'RAIN', 'RATE', 'READ', 'REAL', 'RENT', 'REST', 'TODAY' # Added TODAY based on logs
+             'USD', 'QUIT', 'RACE', 'RAIN', 'RATE', 'READ', 'REAL', 'RENT', 'REST', 'TODAY'
          }
          return words
 
-    # _get_market_data method: Logic remains same, relying on Financial Agent's ability to produce table
     @log_execution_time
     def _get_market_data(self, symbols: List[str]) -> List[str]:
         """Gets market data using the financial agent (original approach)."""
@@ -195,37 +237,34 @@ class AgentOrchestrator:
             return [f"⚠️ Error: Financial analysis module unavailable."] * len(symbols)
 
         for symbol in symbols:
-            time.sleep(settings.financial_api_delay) # Still useful
+            time.sleep(settings.financial_api_delay)
             try:
                 logger.info(f"Requesting financial data table for symbol: {symbol}")
-                # Use the original prompt style asking for the table
+                # Ask for the table directly, relying on agent's reverted instructions
                 query = f"Provide key financial data table for {symbol}"
-                content_str = financial_agent.run(query) # Returns Optional[str]
+                content_str = financial_agent.run(query)
 
                 if content_str:
-                    # Check if agent returned the specific 'not available' message
                     if f"Financial data not available for {symbol}" in content_str:
                         logger.warning(f"Financial agent reported no data for {symbol}.")
                         market_data_results.append(f"⚠️ Data not available for symbol: {symbol}")
-                    # Check if agent returned the 'N/A' message for non-stocks
                     elif f"Metrics not applicable for {symbol}" in content_str:
                          logger.warning(f"Financial agent reported metrics N/A for {symbol}.")
                          market_data_results.append(f"⚠️ Metrics not applicable for symbol: {symbol}")
                     else:
-                        # Assume the content is the desired markdown table or relevant info
+                        # Assume valid table or info returned
                         prefix = f"**{symbol}**:\n"
                         if not content_str.strip().startswith(("|", "**", f"{symbol}:")):
                             market_data_results.append(prefix + content_str)
-                        else:
-                            market_data_results.append(content_str)
+                        else: market_data_results.append(content_str)
                         logger.debug(f"Successfully retrieved response for {symbol}.")
                 else:
                     logger.warning(f"Financial agent returned None or empty response for {symbol}.")
                     market_data_results.append(f"⚠️ No valid data received for symbol: {symbol}")
 
             except ModelProviderError as e:
-                # Keep specific handling for tool_use_failed, even if less likely now
                 error_details = str(e).lower()
+                # Still useful to log tool use failures specifically if they happen
                 if 'tool_use_failed' in error_details:
                     logger.error(f"Tool use failed unexpectedly for {symbol}: {e}", exc_info=False)
                     market_data_results.append(f"⚠️ Tool execution failed for {symbol}")
@@ -233,7 +272,7 @@ class AgentOrchestrator:
                     logger.error(f"ModelProviderError from financial agent for {symbol}: {e}", exc_info=True)
                     market_data_results.append(f"⚠️ Error retrieving data for {symbol} (AI Model Error)")
 
-            except requests.exceptions.HTTPError as e: # Keep HTTP error handling
+            except requests.exceptions.HTTPError as e:
                 status = e.response.status_code if e.response is not None else 'N/A'
                 user_msg = f"⚠️ Error retrieving data for {symbol} (Network Error: {status})"
                 if status == 404: user_msg = f"⚠️ Data not available for symbol: {symbol} (Not Found)"
@@ -247,7 +286,6 @@ class AgentOrchestrator:
 
         return market_data_results
 
-    # _get_news_summary method remains the same as the last correct version...
     @log_execution_time
     def _get_news_summary(self, query: str, symbols_to_fetch: List[str]) -> Optional[str]:
         """Gets news summary using the news agent."""
@@ -273,14 +311,14 @@ class AgentOrchestrator:
             else:
                 logger.warning("News agent returned None or empty response.")
                 return "⚠️ News retrieval failed or returned no content."
-        except requests.exceptions.HTTPError as e: # Catch specific rate limit or network errors
-            if e.response is not None and e.response.status_code == 429:
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code in [429, 202]: # Check for rate limit codes
                  logger.warning(f"DuckDuckGo tool hit rate limit: {e}")
                  return "⚠️ News retrieval failed due to rate limit."
             else:
                  logger.error(f"News agent HTTP error: {e}", exc_info=True)
                  return "⚠️ Error retrieving news (Network/API issue)."
-        except ModelProviderError as e: # Catch potential tool use errors here too
+        except ModelProviderError as e:
              error_details = str(e).lower();
              if 'tool_use_failed' in error_details: logger.error(f"Tool use failed for News Agent: {e}", exc_info=False); return f"⚠️ News retrieval tool execution failed."
              else: logger.error(f"ModelProviderError from news agent: {e}", exc_info=True); return f"⚠️ Error retrieving news (AI Model Error)."
@@ -289,7 +327,6 @@ class AgentOrchestrator:
             return "⚠️ Unexpected error retrieving news."
 
 
-    # _get_vector_search_results method remains the same as the last correct version...
     @log_execution_time
     def _get_vector_search_results(self, query: str) -> Optional[str]:
         """Performs vector search and formats results."""
@@ -302,7 +339,7 @@ class AgentOrchestrator:
             for i, res in enumerate(search_results, 1):
                 source = res.get('source', 'Unk'); doc_type = res.get('type', 'doc').title()
                 text_excerpt = res.get('text', ''); excerpt_tokens = estimate_token_count(text_excerpt)
-                doc_entry_overhead = estimate_token_count(f"\n📄 **Doc {i} ({doc_type}) - Src: {source}**\n\n---") # Shorter header
+                doc_entry_overhead = estimate_token_count(f"\n📄 **Doc {i} ({doc_type}) - Src: {source}**\n\n---")
                 if current_token_count + excerpt_tokens + doc_entry_overhead < max_tokens:
                     doc_entry = f"\n📄 **Doc {i} ({doc_type}) - Src: {source}**\n{text_excerpt}\n---"
                     doc_text_aggregate += doc_entry; current_token_count += excerpt_tokens + doc_entry_overhead
@@ -311,7 +348,6 @@ class AgentOrchestrator:
             formatted_docs.append(doc_text_aggregate.strip()); return "\n".join(formatted_docs)
         except Exception as e: logger.error(f"Vector search/format failed: {e}", exc_info=True); return "⚠️ Error retrieving/formatting docs."
 
-    # _get_enhanced_context method remains the same as the last correct version...
     @log_execution_time
     def _get_enhanced_context(self, query: str, client_context: Optional[dict]) -> dict:
         """Builds context dict: client data, agent results, documents."""
@@ -321,6 +357,8 @@ class AgentOrchestrator:
         symbols = self._extract_symbols(combined_text)
         symbols_to_fetch = symbols[:settings.max_symbols_to_fetch]
         if len(symbols) > settings.max_symbols_to_fetch: logger.warning(f"Too many symbols ({len(symbols)}), limiting fetch to first {settings.max_symbols_to_fetch}: {symbols_to_fetch}")
+
+        # Sequential execution (can be parallelized later if needed)
         if symbols_to_fetch:
             market_data_results = self._get_market_data(symbols_to_fetch)
             context_dict['market_data_summary'] = [summarize_financial_data(r, settings.max_financial_summary_len) if isinstance(r, str) and not r.startswith("⚠️") else r for r in market_data_results]
@@ -328,10 +366,10 @@ class AgentOrchestrator:
         context_dict['relevant_documents'] = self._get_vector_search_results(query)
         return context_dict
 
-    # _build_prompt method remains the same as the last correct version...
     @log_execution_time
     def _build_prompt(self, context_dict: dict) -> str:
         """Constructs the final prompt string for the coordinator agent."""
+        # Using the instructions that ask coordinator to include full tables
         prompt_parts = ["Please analyze the following information and answer the user's query."]
         prompt_parts.append("\n---\n")
         client_context = context_dict.get('client')
@@ -342,8 +380,8 @@ class AgentOrchestrator:
             holdings = client_context.get('holdings', []);
             if holdings:
                 prompt_parts.append(f"- Current Holdings ({len(holdings)} total):")
-                sorted_holdings = sorted(holdings, key=lambda x: x.get('value', 0), reverse=True)
-                holdings_to_show = sorted_holdings[:settings.max_holdings_in_prompt]
+                # Use aggregated holdings now
+                holdings_to_show = holdings[:settings.max_holdings_in_prompt] # Already sorted by value
                 holdings_str = [f"  - `{h.get('symbol', 'N/A')}`: {h.get('allocation', 0):.1f}% (${h.get('value', 0):,.2f})" for h in holdings_to_show]
                 prompt_parts.extend(holdings_str)
                 if len(holdings) > settings.max_holdings_in_prompt: prompt_parts.append(f"  - ... (and {len(holdings) - settings.max_holdings_in_prompt} more)")
@@ -354,17 +392,22 @@ class AgentOrchestrator:
         prompt_parts.append("**Recent Market News Summary**"); prompt_parts.append(news_summary if news_summary else "No significant market-moving news found or retrieval failed."); prompt_parts.append("\n---\n")
         market_data_summary = context_dict.get('market_data_summary');
         if market_data_summary:
-            prompt_parts.append("**Requested Market Data Summary**")
+            prompt_parts.append("**Financial Data Context**") # Changed header slightly
             if isinstance(market_data_summary, list):
-                 for data_item in market_data_summary: prompt_parts.append(f"- {str(data_item).strip()}")
-            else: prompt_parts.append(str(market_data_summary))
-            prompt_parts.append("\n---\n")
+                 # Pass the raw list items (tables or errors) to the coordinator
+                 for item in market_data_summary:
+                     prompt_parts.append(f"{str(item).strip()}") # Pass directly
+                     prompt_parts.append("---") # Add separator between symbols
+            else:
+                 prompt_parts.append(str(market_data_summary)) # Fallback
+            # Removed the extra "\n---\n" after the last item
         relevant_documents = context_dict.get('relevant_documents');
-        if relevant_documents: prompt_parts.append(relevant_documents); prompt_parts.append("\n---\n")
-        prompt_parts.append("Please provide a comprehensive analysis and response based *only* on the information above. Follow the structure defined in your instructions and include the standard investment disclaimer.")
+        if relevant_documents:
+            prompt_parts.append(relevant_documents) # Header included in string
+            prompt_parts.append("\n---\n")
+        prompt_parts.append("Please provide a comprehensive analysis and response based *only* on the information above. Follow the structure defined in your instructions (especially for presenting financial data) and include the standard investment disclaimer.")
         final_prompt = "\n".join(prompt_parts); logger.debug(f"Final prompt built. Length: {len(final_prompt)} chars, Est. Tokens: ~{estimate_token_count(final_prompt)}"); return final_prompt
 
-    # get_response method remains the same as the last correct version...
     @log_execution_time
     def get_response(self, query: str, client_id: str = None, client_context: dict = None) -> str:
         """Main method to get a response. Orchestrates context gathering, agent calls, and error handling."""
@@ -376,7 +419,7 @@ class AgentOrchestrator:
             context_dict = self._get_enhanced_context(query, processed_client_context)
             final_prompt_string = self._build_prompt(context_dict)
             estimated_tokens = estimate_token_count(final_prompt_string); logger.info(f"Est. coordinator tokens: ~{estimated_tokens}")
-            INPUT_TOKEN_WARNING_THRESHOLD = 30000
+            INPUT_TOKEN_WARNING_THRESHOLD = 100000 # Increased threshold assuming 128k context for Llama3-70b
             if estimated_tokens > INPUT_TOKEN_WARNING_THRESHOLD: logger.warning(f"Prompt token estimate ({estimated_tokens}) high.")
             coordinator_agent = self.agents.get('coordinator');
             if not coordinator_agent: logger.critical("Coordinator agent missing!"); raise RuntimeError("Coordinator agent not initialized.")

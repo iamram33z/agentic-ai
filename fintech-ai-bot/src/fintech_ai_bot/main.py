@@ -1,6 +1,6 @@
 # src/fintech_ai_bot/main.py
-# CORRECTED
-
+# CORRECTED & ENHANCED
+from typing import Optional
 import streamlit as st
 import traceback
 import sys
@@ -36,7 +36,7 @@ def setup_ui():
         )
 
         # --- Modern Dark Theme CSS ---
-        # (Paste the full CSS string here as before)
+        # Includes the font size adjustment for sidebar metrics
         st.markdown(f"""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
@@ -109,14 +109,22 @@ def setup_ui():
         .stSidebar .stButton button:hover {{ transform: translateY(-1px); box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4); }}
         .stSidebar .stButton button:active {{ transform: translateY(0); box-shadow: 0 2px 5px rgba(99, 102, 241, 0.3); }}
 
-        /* Portfolio Summary */
+        /* --- Portfolio Summary --- */
         .portfolio-summary {{ padding: 1.5rem 1.2rem; margin-bottom: 1.5rem; border-radius: 12px; background: rgba(15, 23, 42, 0.5); border: 1px solid var(--color-border); backdrop-filter: blur(5px); }}
-        .stSidebar h5 {{ color: var(--color-text-primary); font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; margin-top: 2.5rem; padding-bottom: 0.6rem; position: relative; }}
+        .stSidebar h5 {{ /* "Portfolio Snapshot" title */ color: var(--color-text-primary); font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; margin-top: 2.5rem; padding-bottom: 0.6rem; position: relative; }}
         .stSidebar h5::after {{ content: ''; position: absolute; bottom: 0; left: 0; width: 30px; height: 2px; background: var(--gradient-primary); border-radius: 2px; }}
         .portfolio-summary .stMetric {{ padding: 0.3rem 0; text-align: left; display: flex; flex-direction: column; align-items: flex-start; }}
-        .portfolio-summary .stMetric > label {{ color: var(--color-text-muted); font-size: 0.75rem; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; margin-bottom: 0.3rem; order: 1; }}
-        .portfolio-summary .stMetric > div[data-testid="stMetricValue"] {{ font-size: 1.25rem; color: var(--color-text-primary); font-weight: 700; line-height: 1.3; order: 2; }}
+        .portfolio-summary .stMetric > label {{ /* "Total Value", "Risk Profile" labels */ color: var(--color-text-muted); font-size: 0.75rem; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; margin-bottom: 0.3rem; order: 1; }}
+        /* *** UPDATED METRIC VALUE STYLE *** */
+        .portfolio-summary .stMetric > div[data-testid="stMetricValue"] {{
+            font-size: 1.5rem; /* <<< ADJUST THIS VALUE (e.g., 1.4rem, 1.6rem) */
+            color: var(--color-text-primary);
+            font-weight: 600; /* Slightly less bold */
+            line-height: 1.4;
+            order: 2;
+        }}
         .portfolio-summary div[data-testid="stHorizontalBlock"] > div[data-testid="stVerticalBlock"] {{ gap: 0.5rem; }}
+
 
         /* Holdings List */
         .stSidebar .stExpander {{ background-color: transparent; border: 1px solid var(--color-border); border-radius: 12px; margin-top: 1.5rem; overflow: hidden; }}
@@ -147,14 +155,14 @@ def setup_ui():
         div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-user"]) code {{ background-color: rgba(255, 255, 255, 0.15) !important; color: #e0e7ff !important; }}
         div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-user"]) strong {{ color: white !important; }}
         /* Assistant Message */
-        div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) {{ background-color: var(--color-surface-light); color: var(--color-text-primary); max-width: 85%; }} /* Slightly lighter background for assistant */
+        div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) {{ background-color: var(--color-surface-light); color: var(--color-text-primary); max-width: 85%; }}
         div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) p,
         div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) li {{ color: var(--color-text-primary); }}
         div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) strong {{ color: var(--color-text-primary); font-weight: 700; }}
-        div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) table {{ border-color: var(--color-border-light); box-shadow: none; }} /* Adjust table style if needed */
+        div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) table {{ border-color: var(--color-border-light); box-shadow: none; margin-top: 1em; margin-bottom: 1em;}}
         div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) th {{ background-color: var(--color-surface); border-color: var(--color-border-light); }}
         div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) td {{ border-color: var(--color-border-light); }}
-        div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) tr:nth-child(even) td {{ background-color: rgba(67, 85, 105, 0.3); }} /* Slightly lighter even row */
+        div[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) tr:nth-child(even) td {{ background-color: rgba(67, 85, 105, 0.3); }}
 
 
         /* Chat Input */
@@ -175,22 +183,28 @@ def setup_ui():
         /* Spinner */
         .stSpinner > div {{ border-top-color: var(--color-primary) !important; border-right-color: var(--color-primary) !important; border-bottom-color: rgba(99, 102, 241, 0.3) !important; border-left-color: rgba(99, 102, 241, 0.3) !important; width: 28px !important; height: 28px !important; }}
 
-        /* Markdown Content Styling */
-        .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {{ border-bottom: 1px solid var(--color-border); padding-bottom: 6px; margin-top: 2em; margin-bottom: 1.3em;}}
-        .stMarkdown h4, .stMarkdown h5, .stMarkdown h6 {{ color: var(--color-text-primary); font-weight: 600; margin-top: 1.7em; margin-bottom: 0.8em; }}
-        .stMarkdown code {{ background-color: var(--color-border); padding: 0.2em 0.5em; border-radius: 5px; font-size: 0.9em; color: var(--color-text-primary); font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;}}
-        .stMarkdown pre {{ background-color: var(--color-background); border: 1px solid var(--color-border); padding: 1.2rem; border-radius: 10px; color: var(--color-text-primary); font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace; white-space: pre-wrap; word-wrap: break-word; font-size: 0.95em; margin: 1.5em 0; }}
-        .stMarkdown pre code {{ background-color: transparent; padding: 0; font-size: inherit; }}
-        .stMarkdown table {{ width: 100%; border-collapse: collapse; margin: 2em 0; font-size: 0.95rem; border: 1px solid var(--color-border); box-shadow: 0 3px 6px rgba(0,0,0,0.1); }}
-        .stMarkdown th {{ background-color: var(--color-surface); border: 1px solid var(--color-border); padding: 14px 18px; text-align: left; font-weight: 600; color: var(--color-text-primary); }}
-        .stMarkdown td {{ border: 1px solid var(--color-border); padding: 14px 18px; color: var(--color-text-secondary); vertical-align: top; }}
-        .stMarkdown tr:nth-child(even) td {{ background-color: rgba(30, 41, 59, 0.5); }}
-        .stMarkdown ul, .stMarkdown ol {{ margin-left: 1.5em; padding-left: 1em; margin-bottom: 1.5em; color: var(--color-text-secondary); }}
-        .stMarkdown li {{ margin-bottom: 0.8em; line-height: 1.7; }}
-        .stMarkdown li > p {{ margin-bottom: 0.5em; }}
-        .stMarkdown li::marker {{ color: var(--color-text-secondary); }}
-        .stMarkdown blockquote {{ border-left: 5px solid var(--color-primary); margin-left: 0; padding: 1rem 2rem; background-color: rgba(30, 41, 59, 0.5); color: var(--color-text-secondary); font-style: italic; border-radius: 0 8px 8px 0;}}
-        .stMarkdown blockquote p {{ color: inherit; margin-bottom: 0; }}
+        /* Markdown Content Styling (within assistant messages) */
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown h1,
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown h2,
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown h3 {{ border-bottom: 1px solid var(--color-border); padding-bottom: 6px; margin-top: 1.5em; margin-bottom: 1em;}}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown h4,
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown h5,
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown h6 {{ color: var(--color-text-primary); font-weight: 600; margin-top: 1.5em; margin-bottom: 0.8em; }}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown code {{ background-color: var(--color-border); padding: 0.2em 0.5em; border-radius: 5px; font-size: 0.9em; color: var(--color-text-primary); font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;}}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown pre {{ background-color: var(--color-background); border: 1px solid var(--color-border); padding: 1.2rem; border-radius: 10px; color: var(--color-text-primary); font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace; white-space: pre-wrap; word-wrap: break-word; font-size: 0.95em; margin: 1.5em 0; }}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown pre code {{ background-color: transparent; padding: 0; font-size: inherit; }}
+        /* Table styling within assistant message */
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown table {{ width: auto; /* Allow table to size naturally */ max-width: 100%; border-collapse: collapse; margin: 1.5em 0; font-size: 0.9rem; border: 1px solid var(--color-border-light); box-shadow: none; background-color: var(--color-surface); }}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown th {{ background-color: var(--color-surface); border: 1px solid var(--color-border-light); padding: 10px 14px; text-align: left; font-weight: 600; color: var(--color-text-primary); }}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown td {{ border: 1px solid var(--color-border-light); padding: 10px 14px; color: var(--color-text-secondary); vertical-align: top; }}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown tr:nth-child(even) td {{ background-color: rgba(67, 85, 105, 0.3); }}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown ul,
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown ol {{ margin-left: 1.5em; padding-left: 1em; margin-bottom: 1.5em; color: var(--color-text-secondary); }}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown li {{ margin-bottom: 0.8em; line-height: 1.7; }}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown li > p {{ margin-bottom: 0.5em; }}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown li::marker {{ color: var(--color-text-secondary); }}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown blockquote {{ border-left: 5px solid var(--color-primary); margin-left: 0; padding: 1rem 2rem; background-color: rgba(30, 41, 59, 0.5); color: var(--color-text-secondary); font-style: italic; border-radius: 0 8px 8px 0;}}
+        .stChatMessage[data-testid="stChatMessage"]:has(span[data-testid="chatAvatarIcon-assistant"]) .stMarkdown blockquote p {{ color: inherit; margin-bottom: 0; }}
 
         /* Custom scrollbar */
         ::-webkit-scrollbar {{ width: 10px; height: 10px; }}
@@ -206,6 +220,7 @@ def setup_ui():
         st.error("Failed to initialize application UI styling.")
 
 # --- Resource Initialization (Cached) ---
+# (get_db_client, get_vector_store_client, get_agent_orchestrator functions remain the same)
 @st.cache_resource(show_spinner="Connecting to Database...")
 def get_db_client() -> PostgresClient:
     logger.info("Initializing PostgresClient...")
@@ -215,7 +230,7 @@ def get_db_client() -> PostgresClient:
     except Exception as e:
         logger.critical(f"CRITICAL: Failed to initialize PostgresClient: {e}", exc_info=True)
         st.error(generate_error_html("Database Connection Failed!", f"Could not connect to the database. Please check configuration and network. Error: {e}"), icon="🚨")
-        st.stop() # Stop the app if DB fails
+        st.stop()
 
 @st.cache_resource(show_spinner="Loading Knowledge Base...")
 def get_vector_store_client() -> FAISSClient:
@@ -224,113 +239,91 @@ def get_vector_store_client() -> FAISSClient:
         client = FAISSClient()
         if client.index is None or client.index.ntotal == 0:
              logger.warning("FAISS index seems empty or failed to load properly.")
-             # Displaying warning inside cached function might not always show, better handled in main flow
-             # st.warning("Knowledge base (vector store) might be empty or unavailable.", icon="⚠️")
         return client
     except Exception as e:
         logger.critical(f"CRITICAL: Failed to initialize FAISSClient: {e}", exc_info=True)
         st.error(generate_error_html("Knowledge Base Failed!", f"Could not load the vector store. Contextual answers might be impaired. Error: {e}"), icon="🚨")
-        return None # Return None to indicate failure
+        return None
 
-# --- CORRECTED FUNCTION DEFINITION ---
 @st.cache_resource(show_spinner="Initializing AI Advisor...")
-def get_agent_orchestrator(_db_client: PostgresClient, _vector_store_client: FAISSClient) -> AgentOrchestrator:
-    """
-    Initializes the AgentOrchestrator.
-    Underscores added to arguments to prevent Streamlit from hashing them.
-    """
+def get_agent_orchestrator(_db_client: PostgresClient, _vector_store_client: Optional[FAISSClient]) -> AgentOrchestrator:
     logger.info("Initializing AgentOrchestrator...")
     try:
-        # Use the arguments with underscores inside the function
         orchestrator = AgentOrchestrator(_db_client, _vector_store_client)
         return orchestrator
     except Exception as e:
         logger.critical(f"CRITICAL: Failed to initialize AgentOrchestrator: {e}", exc_info=True)
         st.error(generate_error_html("AI System Failed!", f"The core AI components could not be initialized. Error: {e}"), icon="🚨")
-        st.stop() # Stop the app if orchestrator fails
+        st.stop()
 
 # --- Main Application ---
 def main():
     """Main function to orchestrate the Streamlit application."""
-    setup_ui() # Apply styling first
+    setup_ui()
 
     st.title(settings.app_title)
     st.markdown(f"<p>Your AI partner for financial insights and portfolio analysis.</p>", unsafe_allow_html=True)
 
-    # --- Initialize Core Components ---
-    orchestrator = None # Initialize to None
+    orchestrator = None
     db_client = None
+    vector_store_failed = False
     try:
         db_client = get_db_client()
-        vector_store_client = get_vector_store_client() # Might be None
+        vector_store_client = get_vector_store_client()
+        if vector_store_client is None:
+            vector_store_failed = True # Flag that VS failed but continue
 
-        # Pass the retrieved clients to the orchestrator initializer
-        # NOTE: The arguments passed here DO NOT have underscores
+        # Pass clients to the orchestrator initializer
         orchestrator = get_agent_orchestrator(db_client, vector_store_client)
 
-        # Display warning if vector store failed but we are continuing
-        if vector_store_client is None:
+        if vector_store_failed:
              st.warning("Knowledge base failed to load. Contextual answers from documents may be unavailable.", icon="⚠️")
 
     except Exception as init_error:
-         # Errors during get_db_client or get_agent_orchestrator should stop the app via st.stop()
-         # This catch is for potential logic errors in the sequence itself
          logger.critical(f"Failed during component initialization sequence: {init_error}", exc_info=True)
-         if not st.errors_displayed: # Check if error already shown by cached func
-            st.error(generate_error_html("Application Initialization Error", f"A core component failed to start. Please check logs. Error: {init_error}"), icon="💥")
+         # Error should have been displayed by cached functions if they failed and called st.stop()
+         # If we reach here, it might be an unexpected error between calls.
+         if not getattr(st, 'errors_displayed', False):
+             st.error(generate_error_html("Application Initialization Error", f"A core component failed to start. Please check logs. Error: {init_error}"), icon="💥")
+             st.errors_displayed = True
          st.stop()
 
     # --- Sidebar ---
-    # Ensure db_client is valid before calling sidebar
     if db_client:
         sidebar.manage_sidebar(db_client)
     else:
-        # Handle case where db_client failed init (though get_db_client should stop)
-        st.sidebar.error("Database connection failed. Cannot load client data.", icon="🚨")
-
+        st.sidebar.error("Database connection unavailable.", icon="🚨")
 
     # --- Main Chat Area ---
     if orchestrator and db_client:
-        # Pass the initialized orchestrator and db_client to the chat interface
         chat_interface.display_chat_messages()
         chat_interface.handle_chat_input(orchestrator, db_client)
     else:
-        # Display error if orchestrator or db_client failed to initialize
         st.markdown(f"<hr style='border-top: 1px solid var(--color-border); margin: 2rem 0;'>", unsafe_allow_html=True)
         st.warning("🔴 AI Advisor features are unavailable due to an initialization error.", icon="⚠️")
 
-
 # --- Application Entry Point & Final Exception Handler ---
+# (Final exception handler remains the same)
 if __name__ == "__main__":
-    # Add a global flag to track if errors were displayed by st.error
-    st.errors_displayed = False
+    st.errors_displayed = False # Initialize flag
     try:
         main()
     except SystemExit:
         logger.info("Application stopped via st.stop() or SystemExit.")
-        pass # Allow clean exit from st.stop()
+        pass
     except Exception as e:
         critical_logger = get_logger("MainCriticalError")
-        error_type = type(e).__name__
-        error_message = str(e)
-        full_traceback = traceback.format_exc()
-        critical_logger.critical(f"Application encountered CRITICAL unhandled error: {error_type} - {error_message}", exc_info=True)
+        error_type = type(e).__name__; error_message = str(e); full_traceback = traceback.format_exc()
+        critical_logger.critical(f"Unhandled error: {error_type} - {error_message}", exc_info=True)
         critical_logger.critical(full_traceback)
-
-        # Attempt to display error in Streamlit if possible and not already shown
         try:
-            # Check the flag before displaying a generic error
             if not getattr(st, 'errors_displayed', False):
-                st.error(generate_error_html("Critical Application Error!",
-                         f"A critical error occurred: {error_type}. Please check the application logs or contact support."),
-                         icon="💥")
-                st.errors_displayed = True # Set flag
+                st.error(generate_error_html("Critical Application Error!", f"Error: {error_type}. Check logs."), icon="💥")
+                st.errors_displayed = True
         except Exception as st_err:
             critical_logger.critical(f"!!! FAILED to display critical error via st.error: {st_err}", exc_info=True)
-            # Fallback to printing to stderr
             print(f"\n--- CRITICAL UNHANDLED ERROR ---", file=sys.stderr)
             print(f"Timestamp: {datetime.now()}", file=sys.stderr)
-            print(f"Original Error: {error_type} - {error_message}", file=sys.stderr)
-            print(f"Traceback:\n{full_traceback}", file=sys.stderr)
+            print(f"Original Error: {error_type} - {error_message}\nTraceback:\n{full_traceback}", file=sys.stderr)
             print(f"Error during st.error display: {type(st_err).__name__} - {st_err}", file=sys.stderr)
             print(f"--- END CRITICAL ERROR ---\n", file=sys.stderr)
