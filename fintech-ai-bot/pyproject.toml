@@ -38,7 +38,9 @@ dependencies = [
     # Add other direct dependencies
     "phidata",
     "python-dotenv",
-    "groq"
+    "groq",
+    "fastapi==0.110.2",
+    "uvicorn[standard]==0.29.0"
 ]
 
 [project.optional-dependencies]
