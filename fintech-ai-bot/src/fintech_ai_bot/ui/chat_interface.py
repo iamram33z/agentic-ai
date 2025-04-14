@@ -1,5 +1,5 @@
 # src/fintech_ai_bot/ui/chat_interface.py
-# ENHANCED UI/UX: Improved thinking indicator
+# CORRECTED: Uses correct 'query_text' keyword for DB logging
 
 import streamlit as st
 from fintech_ai_bot.config import settings
@@ -66,27 +66,33 @@ def handle_chat_input(orchestrator: AgentOrchestrator, db_client: PostgresClient
                 )
 
                 # Update the placeholder with the actual response
-                message_placeholder.markdown(response, unsafe_allow_html=True) # Allow HTML for formatted errors/warnings from orchestrator
-                st.session_state.conversation.append({"role": "assistant", "content": response})
+                # Ensure response is treated as a string for logging and display
+                response_str = str(response) if response is not None else ""
+                message_placeholder.markdown(response_str, unsafe_allow_html=True) # Allow HTML for formatted errors/warnings from orchestrator
+                st.session_state.conversation.append({"role": "assistant", "content": response_str})
                 logger.info(f"{log_prefix}: Successfully received response from orchestrator.")
 
                 # --- Database Logging ---
                 # Log successful, non-error interactions to DB if client_id exists
                 # Check if response indicates an error/warning (adjust check based on generate_error/warning_html output)
-                is_error_response = '<div class="error-message">' in response or '<div class="token-warning">' in response or "Error:" in response[:20]
+                is_error_response = '<div class="error-message">' in response_str or '<div class="token-warning">' in response_str or "Error:" in response_str[:20]
 
                 if client_id and not is_error_response:
                     try:
-                        # Log query and a summary of the response
+                        # Log using the passed db_client instance
+                        # Uses 'query_text=' which matches the method definition in postgres_client.py
                         db_client.log_client_query(
                             client_id=client_id,
-                            query=last_user_prompt[:1000], # Limit logged query length
-                            response=response[:2000] # Limit logged response length
+                            query_text=last_user_prompt[:1000], # Use the correct keyword 'query_text'
+                            response_summary=response_str[:2000] # Log summary using the response string
                         )
                         # db_client should handle its own logging success/failure messages
+                    except TypeError as te:
+                        # Add specific logging for TypeError to help debug argument names
+                        logger.error(f"UI layer: TypeError during DB log for {log_prefix}. Check argument names in log_client_query call. Error: {te}", exc_info=False)
                     except Exception as db_log_error:
-                        # Log error if DB logging fails, but don't show to user
-                        logger.error(f"UI layer: Failed to log interaction to DB for {log_prefix}: {db_log_error}", exc_info=False) # Avoid traceback spam for logging errors
+                         # db_client already logs errors, maybe add specific context here if needed
+                        logger.error(f"UI layer: Failed to log interaction to DB for {log_prefix}: {db_log_error}", exc_info=False)
                 elif is_error_response:
                     logger.warning(f"{log_prefix}: Agent response contained error/warning, skipping DB logging for this interaction.")
                 # else: No client ID, cannot log to client query table
