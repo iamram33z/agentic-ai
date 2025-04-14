@@ -1,0 +1,17 @@
+# .streamlit/config.toml
+
+[theme]
+# Set the base theme to dark
+# Streamlit components will now use dark theme defaults.
+base="dark"
+
+# --- Optional: Customize Colors (Examples) ---
+# You can uncomment and adjust these hex codes to further tailor the dark theme.
+# Find hex codes using online color pickers.
+# Reference: https://docs.streamlit.io/library/advanced-features/theming
+
+# primaryColor="#7792E3"        # Accent color for interactive elements like buttons, sliders
+# backgroundColor="#0E1117"    # Main app background color
+# secondaryBackgroundColor="#262730" # Background for sidebar, menus, chat messages, code blocks
+# textColor="#FAFAFA"          # Main text color
+# font="sans serif"            # Options: "sans serif", "serif", "monospace"

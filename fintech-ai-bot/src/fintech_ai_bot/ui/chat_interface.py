@@ -1,84 +1,150 @@
 # src/fintech_ai_bot/ui/chat_interface.py
 # CORRECTED: Safely handle None value for client_context
+# UPDATED: To handle structured responses from orchestrator
+# RELIES ON: .streamlit/config.toml for theme settings (e.g., dark theme)
 
 import streamlit as st
 import pandas as pd
+import traceback # For detailed error logging if needed
+
+# Assuming these imports are correct relative to your project structure
 from fintech_ai_bot.config import settings
 from fintech_ai_bot.core.orchestrator import AgentOrchestrator
 from fintech_ai_bot.utils import get_logger, validate_query_text
 from fintech_ai_bot.db.postgres_client import PostgresClient
-import time
+# from typing import List, Dict, Any # Optional for type hinting
 
 logger = get_logger(__name__)
 
-# --- Display Logic ---
+# --- Page Configuration ---
+# Should be called ONLY ONCE in your main app script (e.g., app.py)
+# st.set_page_config(page_title="Fintech AI Bot", layout="wide")
+# --- End Page Configuration ---
+
+
+# --- Structured Content Rendering Logic ---
 
 def render_structured_content(content_list):
-    """Renders a list of structured content elements (FUTURE USE)."""
+    """Renders a list of structured content elements."""
     if not isinstance(content_list, list):
         st.warning("⚠️ Expected content to be a list for structured response.")
-        st.markdown(str(content_list))
+        # Attempt to display non-list content as markdown or json as fallback
+        try:
+            st.markdown(str(content_list))
+        except Exception:
+             try:
+                 st.json(content_list)
+             except Exception:
+                  st.error("Could not display the unexpected content format.")
         return
 
     for element in content_list:
-         if not isinstance(element, dict) or "type" not in element:
+        if not isinstance(element, dict) or "type" not in element:
             st.warning(f"⚠️ Skipping invalid element in structured response: {element}")
             continue
 
-         el_type = element.get("type")
-         try:
+        el_type = element.get("type")
+        content = element.get("content") # Used for error/warning types
+        text = element.get("text")       # Used for header/markdown types
+        data = element.get("data")       # Used for table type
+
+        try:
             if el_type == "header":
-                level = element.get("level", 2)
-                text = element.get("text", "")
-                if level == 1: st.header(text)
-                elif level == 2: st.subheader(text)
-                elif level == 3: st.markdown(f"### {text}")
-                elif level == 4: st.markdown(f"#### {text}")
-                else: st.markdown(f"##### {text}")
+                level = element.get("level", 4) # Default level
+                header_text = text or ""
+                # Render headers as bold markdown for style similar to image
+                st.markdown(f"**{header_text}**")
+                # Alternative using header levels (might add more spacing):
+                # if level == 1: st.header(header_text)
+                # elif level == 2: st.subheader(header_text)
+                # elif level == 3: st.markdown(f"### {header_text}")
+                # else: st.markdown(f"#### {header_text}")
+
             elif el_type == "markdown":
-                st.markdown(element.get("text", ""), unsafe_allow_html=False)
+                markdown_text = text or ""
+                if markdown_text.strip(): # Avoid rendering empty markdown strings
+                     st.markdown(markdown_text, unsafe_allow_html=False) # Security: Keep False
+
             elif el_type == "table":
-                data = element.get("data")
-                if isinstance(data, list) and data:
-                    df = pd.DataFrame(data)
-                    st.dataframe(df, use_container_width=True)
+                df = None
+                if isinstance(data, list) and data and all(isinstance(row, dict) for row in data):
+                    try:
+                        df = pd.DataFrame(data)
+                    except Exception as df_err:
+                         logger.error(f"Error creating DataFrame from list: {df_err}", exc_info=True)
+                         st.warning("⚠️ Could not create table from data list.")
+                         st.json(data) # Show raw data on failure
                 elif isinstance(data, pd.DataFrame):
-                     st.dataframe(data, use_container_width=True)
-                else:
-                    st.warning("⚠️ Table data is missing or not in expected list/DataFrame format.")
-                    if data: st.json(data)
+                    df = data
+
+                if df is not None and not df.empty:
+                    # use_container_width=True makes it fit bubble
+                    # hide_index=True often looks better for display tables
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                elif df is not None and df.empty:
+                     st.caption("[Empty Table]") # Indicate empty table explicitly
+                elif el_type == "table": # Only warn if type was table but df creation failed/no data
+                    st.warning("⚠️ Table data is missing or not in expected list[dict]/DataFrame format.")
+                    if data: st.json(data) # Display raw data if format is wrong but not empty
+
+            elif el_type == "error":
+                error_content = content or "An unspecified error occurred."
+                st.error(str(error_content)) # Display as Streamlit error
+
+            elif el_type == "warning":
+                warning_content = content or "Received an unspecified warning."
+                st.warning(str(warning_content)) # Display as Streamlit warning
+
             else:
+                # Handle unknown types gracefully
                 st.warning(f"⚠️ Unknown content type '{el_type}' in structured response.")
-                st.json(element)
-         except Exception as e:
+                st.json(element) # Display unknown structure as JSON
+
+        except Exception as e:
             logger.error(f"Error rendering element type '{el_type}': {e}", exc_info=True)
             st.error(f"Could not render element: {element.get('type', 'Unknown')}")
+            st.json(element) # Show raw element on render failure
 
+
+# --- Chat History Display Logic ---
 
 def display_chat_messages():
-    """Displays the chat history, rendering messages based on their type."""
+    """
+    Displays the chat history using st.chat_message.
+    Handles both standard markdown and new structured_response types.
+    """
     # Initialize conversation state if it doesn't exist
     if 'conversation' not in st.session_state:
-        # --- CORRECTED CONTEXT HANDLING ---
-        client_context = st.session_state.get('client_context') # Get context, could be None
+        client_context = st.session_state.get('client_context')
         client_name = None
-        # Only try to get 'name' if client_context is actually a dictionary
         if isinstance(client_context, dict):
             client_name = client_context.get('name')
-        # --- END CORRECTION ---
 
-        # Now check client_name (which might be None)
-        if client_name and client_name != st.session_state.get('client_id'): # Check if a real name is loaded
-             welcome_msg = f"Hello! Client **{client_name}** is loaded. How can I assist?"
+        # Use client name in welcome message if available and different from ID
+        client_id_in_state = st.session_state.get('client_id')
+        if client_name and client_id_in_state and client_name != client_id_in_state :
+             welcome_msg = f"Hello! Client **{client_name}** (`{client_id_in_state}`) is loaded. How can I assist?"
+        elif client_id_in_state:
+             welcome_msg = f"Hello! Client ID **{client_id_in_state}** is loaded. How can I assist?"
         else:
              welcome_msg = "Hello! How can I assist? Load a client profile for specific analysis."
-        st.session_state.conversation = [{"role": "assistant", "content": welcome_msg, "type": "markdown"}] # Default type
 
-    # Display all messages
+        # Store initial message with markdown type
+        st.session_state.conversation = [{"role": "assistant", "content": welcome_msg, "type": "markdown"}]
+
+    # Display all messages from history
     for i, message in enumerate(st.session_state.conversation):
-        avatar = settings.user_avatar if message["role"] == "user" else settings.assistant_avatar
-        with st.chat_message(message["role"], avatar=avatar):
-            msg_type = message.get("type", "markdown") # Default to markdown if type is missing
+        # Safely get avatar URLs
+        avatar_url = None
+        role = message.get("role", "assistant") # Default to assistant if role missing
+        if role == "user":
+            avatar_url = getattr(settings, 'user_avatar', None)
+        else: # Assistant or other roles
+            avatar_url = getattr(settings, 'assistant_avatar', None)
+
+        # Display message in chat container
+        with st.chat_message(role, avatar=avatar_url):
+            msg_type = message.get("type", "markdown") # Default to markdown
             content = message.get("content")
 
             if content is None:
@@ -86,35 +152,38 @@ def display_chat_messages():
                 continue
 
             try:
-                # Handle specific error/warning types first
-                if msg_type == "error" or (isinstance(content, str) and content.strip().startswith("Error:")):
-                    # Remove "Error:" prefix for cleaner display if present
-                    display_content = content.replace("Error:", "", 1).strip()
-                    st.error(display_content)
-                elif msg_type == "warning" or (isinstance(content, str) and content.strip().startswith("⚠️")):
-                    st.warning(content)
-                # Handle potential future structured responses
-                elif msg_type == "structured_response":
-                    render_structured_content(content)
-                # Default: Render content as Markdown (handles tables/headers if present in string)
-                else:
-                    st.markdown(str(content), unsafe_allow_html=False) # unsafe_allow_html=False is safer
+                # --- Render based on type ---
+                if msg_type == "structured_response":
+                    render_structured_content(content) # Use the dedicated renderer
+                elif msg_type == "error":
+                    # Errors might now be part of structured response, but handle direct error type too
+                    st.error(str(content))
+                elif msg_type == "warning":
+                    st.warning(str(content))
+                elif isinstance(content, str): # Default to markdown if it's a string
+                    st.markdown(content, unsafe_allow_html=False)
+                else: # Fallback for unexpected content types stored directly
+                    st.warning(f"⚠️ Unexpected message content type '{type(content)}' found in history (index {i}). Displaying as JSON.")
+                    st.json(content)
 
             except Exception as e:
-                 logger.error(f"Failed to render message index {i} (type: {msg_type}): {e}", exc_info=True)
-                 st.error(f"Could not display message content.")
+                logger.error(f"Failed to render message index {i} (type: {msg_type}, role: {role}): {e}", exc_info=True)
+                st.error(f"Could not display message content for index {i}.")
 
 
 # --- Input Handling Logic ---
 def handle_chat_input(orchestrator: AgentOrchestrator, db_client: PostgresClient):
-    """Handles user input, orchestrator calls (receiving single string), response display, and logging."""
+    """Handles user input, orchestrator calls, structured response display, and logging."""
     prompt = st.chat_input("Ask a financial question...")
 
     if prompt:
+        # Append user message (will align right)
         st.session_state.conversation.append({"role": "user", "content": prompt, "type": "markdown"})
+        # Rerun immediately to show the user's input
         st.rerun()
 
-    if st.session_state.conversation[-1]["role"] == "user":
+    # Check if the last message is from the user, indicating the assistant should respond
+    if st.session_state.conversation and st.session_state.conversation[-1]["role"] == "user":
         last_user_prompt = st.session_state.conversation[-1]["content"]
         client_id = st.session_state.get('client_id')
         client_context = st.session_state.get('client_context')
@@ -122,63 +191,84 @@ def handle_chat_input(orchestrator: AgentOrchestrator, db_client: PostgresClient
 
         # --- Input Validation ---
         if not validate_query_text(last_user_prompt):
-            # Orchestrator also validates, but catch early in UI
             error_msg = "⚠️ **Invalid Query Format:** Query is too short/long or invalid. Please ask a clear question (3-1500 chars)."
+            # Append assistant warning (will align left)
             st.session_state.conversation.append({"role": "assistant", "content": error_msg, "type": "warning"})
             logger.warning(f"{log_prefix}: Invalid query format blocked by UI: '{last_user_prompt[:60]}...'")
-            st.rerun()
+            st.rerun() # Rerun to display the warning
             return
 
-        # --- Call Orchestrator and Display Response ---
-        with st.chat_message("assistant", avatar=settings.assistant_avatar):
-            response_str = None # Initialize
+        # --- Call Orchestrator and Display Response (within assistant's chat message) ---
+        assistant_avatar_url = getattr(settings, 'assistant_avatar', None)
+        # Use chat_message context manager to ensure spinner and response appear in the assistant bubble
+        with st.chat_message("assistant", avatar=assistant_avatar_url):
+            response_obj = None # Will hold the list[dict] or error structure
+            assistant_message_to_log = {"role": "assistant"} # Prepare message to add to history
+
             with st.spinner("Thinking..."):
                 try:
                     logger.info(f"{log_prefix}: Calling orchestrator for query: '{last_user_prompt[:80]}...'")
-
-                    # --- Call Orchestrator (Returns single string) ---
-                    response_str = orchestrator.get_response(
+                    # Orchestrator now returns List[Dict[str, Any]]
+                    response_obj = orchestrator.get_response(
                         query=last_user_prompt,
                         client_id=client_id,
                         client_context=client_context
                     )
-                    logger.info(f"{log_prefix}: Successfully received response from orchestrator.")
+                    logger.info(f"{log_prefix}: Successfully received response structure from orchestrator.")
 
-                    # --- Display Full Response ---
-                    if response_str:
-                         # Check if response is an error string from orchestrator
-                         if response_str.strip().startswith("Error:"):
-                              error_content = response_str.replace("Error:", "", 1).strip()
-                              st.error(error_content)
-                              st.session_state.conversation.append({"role": "assistant", "content": error_content, "type": "error"})
-                         else:
-                              # Display as Markdown - RELIES ON ORCHESTRATOR FOR FORMATTING (headers, tables)
-                              st.markdown(response_str, unsafe_allow_html=False)
-                              st.session_state.conversation.append({"role": "assistant", "content": response_str, "type": "markdown"})
-                    else:
-                         logger.warning(f"{log_prefix}: Orchestrator returned an empty response.")
-                         st.warning("Received an empty response from the advisor.")
-                         st.session_state.conversation.append({"role": "assistant", "content": "[Received empty response]", "type": "warning"})
+                    # Render the structured response immediately
+                    render_structured_content(response_obj)
+
+                    # Prepare message for history logging
+                    assistant_message_to_log["content"] = response_obj
+                    assistant_message_to_log["type"] = "structured_response"
 
                 except Exception as e:
-                    # Catch unexpected errors during the call itself (less likely if orchestrator handles its errors)
+                    # Catch errors during the orchestrator call itself
                     logger.error(f"{log_prefix}: Unexpected error calling orchestrator: {e}", exc_info=True)
-                    error_msg = f"🚨 **System Error:** Failed to get response from advisor: `{e}`."
-                    st.error(error_msg)
-                    st.session_state.conversation.append({"role": "assistant", "content": error_msg, "type": "error"})
-                    response_str = None # Ensure no logging happens
+                    error_msg_content = f"🚨 **System Error:** Failed to get response from advisor. Please check logs or try again later."
+                    # Display user-friendly error within the assistant's chat bubble
+                    st.error(error_msg_content)
+                    # Log a structured error message to history
+                    response_obj = [{"type": "error", "content": f"System Error (UI Layer): {e}"}] # Create error structure
+                    assistant_message_to_log = {"role": "assistant", "content": response_obj, "type": "structured_response"}
 
-            # --- Database Logging (after response or error) ---
-            if response_str and client_id and not response_str.strip().startswith("Error:"):
-                 try:
-                    db_client.log_client_query(
-                        client_id=client_id,
-                        query_text=last_user_prompt[:1000],
-                        response_summary=response_str[:2000]
-                    )
-                 except TypeError as te:
-                      logger.error(f"UI layer: TypeError during DB log for {log_prefix}. Check args. Error: {te}", exc_info=False)
-                 except Exception as db_log_error:
-                    logger.error(f"UI layer: Failed to log interaction to DB for {log_prefix}: {db_log_error}", exc_info=False)
-            elif response_str and response_str.strip().startswith("Error:"):
-                 logger.warning(f"{log_prefix}: Orchestrator returned an error response, skipping DB logging.")
+            # Append the assistant's full message (which is the structured list) to history *after* displaying it
+            st.session_state.conversation.append(assistant_message_to_log)
+
+            # --- Database Logging ---
+            # Decide what to log for structured responses. Maybe a summary?
+            # For now, log a placeholder indicating a structured response was given,
+            # unless the response itself was primarily an error message.
+            is_error_response = isinstance(response_obj, list) and len(response_obj) == 1 and response_obj[0].get("type") == "error"
+            response_summary_for_db = "[Structured Response Provided]"
+            if is_error_response:
+                 response_summary_for_db = f"[Error Response]: {response_obj[0].get('content', '')}"[:2000] # Log error content
+                 logger.warning(f"{log_prefix}: Orchestrator returned an error response, logging error summary.")
+
+            # Log only if we have a client ID and the response wasn't purely an error caught *before* logging
+            if client_id and response_obj: # Check response_obj exists
+                 if not is_error_response: # Log success placeholder
+                     try:
+                         db_client.log_client_query(
+                             client_id=client_id,
+                             query_text=last_user_prompt[:1000],
+                             response_summary=response_summary_for_db
+                         )
+                     except TypeError as te:
+                         logger.error(f"UI layer: TypeError during DB log for {log_prefix}. Check log_client_query args. Error: {te}", exc_info=False)
+                     except Exception as db_log_error:
+                         logger.error(f"UI layer: Failed to log interaction to DB for {log_prefix}: {db_log_error}", exc_info=False)
+                 # else: Error response summary logged above if is_error_response is True
+
+        # No st.rerun() needed here; Streamlit handles updates after the 'with' block.
+
+
+# --- Example Usage Placeholder ---
+# (Keep the placeholder for potential standalone testing as before)
+# if __name__ == "__main__":
+#     # ... Placeholder initializations ...
+#     # st.title("Financial Advisor Chat (UI Module Test)")
+#     # display_chat_messages()
+#     # handle_chat_input(st.session_state.orchestrator, st.session_state.db_client)
+#     pass

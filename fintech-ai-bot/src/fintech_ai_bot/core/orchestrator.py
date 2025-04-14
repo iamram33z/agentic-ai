@@ -560,3 +560,278 @@ class AgentOrchestrator:
              logger.critical(f"Unexpected critical error: {str(e)}", exc_info=True);
              logger.critical(traceback.format_exc());
              return "Error: Unexpected Error - An unexpected internal error occurred. Please contact support."
+
+        def _try_parse_markdown_table(self, text_block: str) -> Optional[List[Dict[str, str]]]:
+            """Attempts to parse the first Markdown table found in a text block."""
+            lines = text_block.strip().split('\n')
+            table_lines = []
+            in_table = False
+            header = []
+            col_align = []
+
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                # Look for table row markers or separator lines
+                is_separator = '---' in stripped and stripped.replace('-', '').replace('|', '').replace(' ',
+                                                                                                        '').replace(':',
+                                                                                                                    '') == ''
+                is_potential_data_row = stripped.startswith('|') and stripped.endswith('|') and not is_separator
+
+                if is_separator:
+                    # Check if the previous line looks like a header
+                    if i > 0 and lines[i - 1].strip().startswith('|') and not ('---' in lines[i - 1]):
+                        header_line = lines[i - 1].strip()
+                        header = [h.strip() for h in header_line.strip('|').split('|')]
+                        col_align = [a.strip() for a in stripped.strip('|').split('|')]
+                        if len(header) > 0 and len(header) == len(col_align):
+                            in_table = True
+                            # Clear any previous non-table lines mistaken for data
+                            table_lines = []
+                        else:
+                            header = []  # Reset if mismatch or empty header
+                            in_table = False
+                    continue  # Move to next line after processing separator
+
+                elif is_potential_data_row and in_table:  # Only collect data rows if we are confirmed to be in a table
+                    table_lines.append(stripped)
+
+                elif in_table:  # A non-table line encountered after table started, assume table ended
+                    break
+
+            if not in_table or not header or not table_lines:
+                logger.debug("No valid markdown table found in block.")
+                return None  # No valid table found
+
+            parsed_data = []
+            num_cols = len(header)
+            for line_num, line in enumerate(table_lines):
+                cols = [c.strip() for c in line.strip('|').split('|')]
+                if len(cols) == num_cols:
+                    # Ensure header keys are not empty strings if parsing produced them
+                    clean_header = [h if h else f"Column_{idx + 1}" for idx, h in enumerate(header)]
+                    row_dict = dict(zip(clean_header, cols))
+                    parsed_data.append(row_dict)
+                else:
+                    logger.warning(
+                        f"Skipping table row {line_num + 1} due to column count mismatch. Expected {num_cols}, got {len(cols)}. Row: '{line}'")
+
+            logger.debug(f"Parsed table with {len(parsed_data)} rows and columns: {header}")
+            return parsed_data if parsed_data else None
+
+        def _parse_coordinator_response(self, markdown_text: str) -> List[Dict[str, Any]]:
+            """
+            Parses the coordinator's markdown response into a structured list of dictionaries.
+            Handles headers (like **Header:**) and attempts to parse markdown tables.
+            """
+            if not markdown_text or not isinstance(markdown_text, str):
+                logger.warning("Received empty or invalid text for parsing.")
+                # Return a structured representation even for empty/invalid input
+                return [{"type": "markdown", "text": markdown_text or "[No content available]"}]
+
+            # Define potential headers (case-insensitive matching, strip ':')
+            # Expanded list based on common patterns
+            known_headers = [
+                "Executive Summary", "Summary",
+                "Analysis Context", "Analysis Context: Market News", "Market News", "News Summary",
+                "Financial Data", "Data", "Metrics",
+                "Knowledge Base", "Document Context",
+                "Client Portfolio Context", "Portfolio Context", "Client Context",
+                "Recommendation & Risks", "Recommendations", "Risks", "Analysis", "Response",
+                "Disclaimer", "Important Information"
+            ]
+            # Normalize headers: store lowercase version as key, original format with colon as value
+            normalized_headers = {h.lower().strip(':'): h + ":" for h in known_headers}
+
+            structured_list = []
+            lines = markdown_text.strip().split('\n')
+            current_content_lines = []
+            current_header_text = None  # Holds the text of the *last* detected header
+            found_first_header = False
+
+            for line in lines:
+                stripped_line = line.strip()
+                matched_header = None
+
+                # Check if line matches a known header format (e.g., **Header:** or #### Header)
+                # More robust header matching
+                header_match_bold = re.match(r'\*\*(.+?):\*\*', stripped_line)
+                header_match_h4 = re.match(r'####\s*(.+)', stripped_line)
+
+                potential_header_text = None
+                if header_match_bold:
+                    potential_header_text = header_match_bold.group(1).strip()
+                elif header_match_h4:
+                    potential_header_text = header_match_h4.group(1).strip().rstrip(
+                        ':')  # Remove trailing colon if present
+
+                # Normalize and check against known headers
+                if potential_header_text:
+                    normalized_potential = potential_header_text.lower()
+                    if normalized_potential in normalized_headers:
+                        matched_header = normalized_headers[normalized_potential]  # Get the canonical header text
+
+                # If a new known header is found
+                if matched_header:
+                    found_first_header = True
+                    # Process the content collected for the *previous* header
+                    if current_header_text and current_content_lines:
+                        content_block = "\n".join(current_content_lines).strip()
+                        if content_block:  # Only add if there's actual content
+                            # Special handling for Financial Data sections
+                            if any(term in current_header_text.lower() for term in ["financial data", "metrics"]):
+                                # Try to parse a table within this block
+                                parsed_table = self._try_parse_markdown_table(content_block)
+                                if parsed_table:
+                                    # Find text *before* the table (if any)
+                                    table_start_index = content_block.find('\n|')  # Find first newline followed by pipe
+                                    if table_start_index == -1: table_start_index = content_block.find(
+                                        '|')  # Or just first pipe
+
+                                    markdown_before = content_block[
+                                                      :table_start_index].strip() if table_start_index != -1 else None
+                                    if markdown_before:
+                                        structured_list.append({"type": "markdown", "text": markdown_before})
+                                    structured_list.append({"type": "table", "data": parsed_table})
+                                    # TODO: Handle text *after* the table if needed? Currently ignored.
+                                else:
+                                    # No table found, add the whole block as markdown
+                                    structured_list.append({"type": "markdown", "text": content_block})
+                            else:
+                                # For other sections, just add the markdown block
+                                structured_list.append({"type": "markdown", "text": content_block})
+
+                    # Start the new section with the matched header
+                    structured_list.append({"type": "header", "level": 4, "text": matched_header})
+                    current_header_text = matched_header
+                    current_content_lines = []  # Reset content for the new section
+                elif found_first_header:  # Only collect content *after* the first header is found
+                    # Add the line to the current section's content, preserving original spacing/formatting
+                    current_content_lines.append(line)
+                # Optional: Collect content before the first header if needed
+                # elif not found_first_header and stripped_line:
+                #     structured_list.append({"type": "markdown", "text": line}) # Add intro lines
+
+            # Add the content of the very last section
+            if current_header_text and current_content_lines:
+                content_block = "\n".join(current_content_lines).strip()
+                if content_block:
+                    if any(term in current_header_text.lower() for term in ["financial data", "metrics"]):
+                        parsed_table = self._try_parse_markdown_table(content_block)
+                        if parsed_table:
+                            table_start_index = content_block.find('\n|')
+                            if table_start_index == -1: table_start_index = content_block.find('|')
+                            markdown_before = content_block[
+                                              :table_start_index].strip() if table_start_index != -1 else None
+                            if markdown_before:
+                                structured_list.append({"type": "markdown", "text": markdown_before})
+                            structured_list.append({"type": "table", "data": parsed_table})
+                        else:
+                            structured_list.append({"type": "markdown", "text": content_block})
+                    else:
+                        structured_list.append({"type": "markdown", "text": content_block})
+
+            # If parsing failed to identify any known headers, return the original text as one block
+            if not found_first_header:
+                logger.warning(
+                    "Could not parse coordinator response into known sections. Returning as single markdown block.")
+                return [{"type": "markdown", "text": markdown_text}]
+
+            # Filter out empty markdown elements that might have been added
+            return [item for item in structured_list if
+                    item.get("type") != "markdown" or (item.get("text") and item.get("text").strip())]
+
+        # Now, modify the get_response method like this:
+        @log_execution_time
+        def get_response(self, query: str, client_id: str = None, client_context: dict = None) -> List[
+            Dict[str, Any]]:  # <<< Return type changed
+            """
+            Main method to get a response. Orchestrates context gathering, agent calls, and error handling.
+            Returns a structured list of dictionaries representing the response content.
+            """
+            final_prompt_string = ""  # Keep for potential error context
+            try:
+                # Validate query input
+                if not validate_query_text(query):
+                    logger.warning(f"Invalid query received: '{query}'")
+                    # Return structured error
+                    return [{"type": "error",
+                             "content": "Invalid Query Format - Please provide a specific question (3-1500 characters)."}]
+
+                logger.info(f"Processing query for client '{client_id or 'generic'}': '{query[:100]}...'")
+
+                # Prepare context (fetches/processes DB data if needed)
+                processed_client_context = self._prepare_client_context(client_id, client_context)
+
+                # Enhance context with agent results (market data, news, docs)
+                context_dict = self._get_enhanced_context(query, processed_client_context)
+
+                # Build the final prompt for the coordinator agent
+                final_prompt_string = self._build_prompt(context_dict)
+
+                # Estimate token count and log warning if high
+                estimated_tokens = estimate_token_count(final_prompt_string)
+                logger.info(f"Est. coordinator tokens: ~{estimated_tokens}")
+                INPUT_TOKEN_WARNING_THRESHOLD = settings.coordinator_agent_model.max_tokens * 0.8
+                if estimated_tokens > INPUT_TOKEN_WARNING_THRESHOLD:
+                    logger.warning(
+                        f"Prompt token estimate ({estimated_tokens}) exceeds threshold ({INPUT_TOKEN_WARNING_THRESHOLD}).")
+
+                # Get coordinator agent and run it
+                coordinator_agent = self.agents.get('coordinator')
+                if not coordinator_agent:
+                    logger.critical("Coordinator agent missing!")
+                    # Return structured error
+                    return [{"type": "error", "content": "System Configuration Error - Coordinator agent unavailable."}]
+
+                logger.debug(
+                    f"Sending prompt to coordinator ({settings.coordinator_agent_model.id}). Length: {len(final_prompt_string)} chars")
+                response_content = coordinator_agent.run(final_prompt_string)  # Gets the markdown string
+
+                # Format and return the response
+                if response_content:
+                    # *** NEW: Parse the markdown into structured list ***
+                    try:
+                        structured_response = self._parse_coordinator_response(response_content)
+                        if not structured_response:  # Handle case where parsing returns empty
+                            logger.error("Parsing coordinator response resulted in an empty structure. Falling back.")
+                            return [
+                                {"type": "markdown", "text": format_markdown_response(response_content)}]  # Fallback
+                        logger.info("Successfully parsed coordinator response into structured format.")
+                        return structured_response  # <<< Return the list[dict]
+                    except Exception as parse_error:
+                        logger.error(f"Failed to parse coordinator response into structured format: {parse_error}",
+                                     exc_info=True)
+                        # Fallback to returning the raw (but formatted) markdown within structure
+                        return [{"type": "markdown", "text": format_markdown_response(response_content)}]
+                else:
+                    logger.error("Coordinator agent returned None or empty response.")
+                    # Return structured error
+                    return [{"type": "error",
+                             "content": "Processing Error - AI advisor failed the final response generation."}]
+
+            # --- Error Handling (Returning Structured Errors) ---
+            except ModelProviderError as e:
+                error_details = str(e);
+                logger.error(f"Model provider error: {error_details}", exc_info=True)
+                error_msg = f"AI Model Error - An issue occurred. Details: {error_details}"  # Default
+                if "context_length_exceeded" in error_details.lower() or (
+                        hasattr(e, 'code') and e.code == 400 and "maximum context length" in error_details.lower()):
+                    ft = estimate_token_count(final_prompt_string);
+                    logger.error(f"Context Length Exceeded. Est. tokens: ~{ft}")
+                    error_msg = f"Request Too Complex - Analysis context (~{ft} tokens) exceeded model limits. Please simplify your request."
+                elif "model_decommissioned" in error_details.lower():
+                    error_msg = f"AI Model Error - Model unavailable/decommissioned. Check config. Details: {error_details}"
+                elif "tool_use_failed" in error_details.lower():
+                    error_msg = f"AI Tool Error - An underlying tool failed. Details: {error_details}"
+                else:
+                    logger.error(
+                        f"Failed Prompt Snippet:\n{final_prompt_string[:500]}...");  # Log snippet for general errors
+                return [{"type": "error", "content": error_msg}]
+            except (RuntimeError, ValueError) as e:
+                logger.error(f"Internal processing error: {str(e)}", exc_info=True);
+                return [{"type": "error", "content": f"Processing Error - An internal error occurred: {e}"}]
+            except Exception as e:
+                logger.critical(f"Unexpected critical error: {str(e)}", exc_info=True);
+                logger.critical(traceback.format_exc());
+                return [{"type": "error",
+                         "content": "Unexpected Error - An unexpected internal error occurred. Please contact support."}]
