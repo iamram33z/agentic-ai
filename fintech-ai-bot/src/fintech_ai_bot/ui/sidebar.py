@@ -1,5 +1,6 @@
 # src/fintech_ai_bot/ui/sidebar.py
 # ENHANCED UI/UX: Added st.form, dividers, theme-adaptive chart
+# + TEMPORARY DEBUGGING for client name issue
 
 import streamlit as st
 from typing import Optional, Dict, Any
@@ -13,6 +14,7 @@ from fintech_ai_bot.core.orchestrator import AgentOrchestrator # Still needed fo
 logger = get_logger(__name__)
 
 # --- Database Interaction & Caching ---
+# --- Includes DEBUG steps ---
 @st.cache_data(ttl=settings.cache_ttl_seconds, show_spinner="Fetching client portfolio...") # Use TTL from settings
 def get_client_portfolio_cached(client_id: str, _db_client: PostgresClient) -> Optional[Dict]:
     """ Cached wrapper for fetching and processing portfolio data. """
@@ -23,7 +25,14 @@ def get_client_portfolio_cached(client_id: str, _db_client: PostgresClient) -> O
 
     logger.info(f"Cache check/fetch for client ID: {validated_id}")
     try:
+        # Fetch raw data from DB (should include 'name' now)
         raw_portfolio = _db_client.get_client_portfolio(validated_id)
+
+        # --- DEBUG STEP 1: Check raw_portfolio ---
+        st.sidebar.write("--- DEBUG: Raw Portfolio from DB ---")
+        st.sidebar.json(raw_portfolio or {"error": "No raw data returned"})
+        # --- END DEBUG STEP 1 ---
+
         if not raw_portfolio:
             logger.warning(f"No portfolio data returned from DB for {validated_id}")
             return None # Explicitly return None if no data
@@ -32,10 +41,11 @@ def get_client_portfolio_cached(client_id: str, _db_client: PostgresClient) -> O
             return None
 
         logger.info(f"Raw portfolio data retrieved from DB for {validated_id}, processing...")
+        processed_portfolio = None # Initialize before try block
         try:
+            # !! This is the likely suspect !!
             # !! IMPORTANT: Calling a private method of another class like this is poor practice.
             # This processing logic should ideally be moved to a shared utility or service layer.
-            # Keeping the workaround for now as per original structure.
             processed_portfolio = AgentOrchestrator._process_db_portfolio(None, validated_id, raw_portfolio)
 
         except AttributeError:
@@ -43,32 +53,41 @@ def get_client_portfolio_cached(client_id: str, _db_client: PostgresClient) -> O
              # Basic fallback structure if processing fails
              processed_portfolio = {
                  "id": validated_id,
-                 "name": f"Client {validated_id[-4:]}" if len(validated_id) >= 4 else f"Client {validated_id}",
+                 "name": f"Client {validated_id[-4:]}" if len(validated_id) >= 4 else f"Client {validated_id}", # Fallback name
                  "risk_profile": raw_portfolio.get('risk_profile', 'Not specified') or 'Not specified',
                  "portfolio_value": float(raw_portfolio.get('total_value', 0.0)),
                  "holdings": raw_portfolio.get('holdings', [])
              }
-             if not validate_portfolio_data(processed_portfolio): # Validate fallback structure
+             # Even if fallback works, validate it
+             if not validate_portfolio_data(processed_portfolio):
                   logger.error(f"Basic processed portfolio fallback failed validation for {validated_id}")
-                  return None
+                  return None # Return None if fallback is invalid
 
         except Exception as proc_e:
             logger.error(f"Error during portfolio processing step for {validated_id}: {proc_e}", exc_info=True)
             return None # Return None if processing fails
+
+        # --- DEBUG STEP 2: Check processed_portfolio ---
+        st.sidebar.write("--- DEBUG: Processed Portfolio ---")
+        st.sidebar.json(processed_portfolio or {"error": "Processing failed or returned None"})
+        # --- END DEBUG STEP 2 ---
 
         # Final validation after processing
         if processed_portfolio and validate_portfolio_data(processed_portfolio):
             logger.info(f"Successfully processed/validated portfolio for {validated_id}. Caching result.")
             return processed_portfolio
         else:
-            logger.error(f"Processed portfolio failed validation for {validated_id}. Caching None.")
+            # Log if validation fails *after* processing seemed okay
+            if processed_portfolio:
+                 logger.error(f"Processed portfolio failed validation for {validated_id}. Processed data: {processed_portfolio}")
+            else:
+                 logger.error(f"Processing resulted in None or empty data for {validated_id}, cannot validate.")
             return None # Cache None if validation fails
 
     except Exception as e:
         logger.error(f"Database error during cache fetch/processing for {validated_id}: {e}", exc_info=True)
         # Don't display UI error here, let the calling function handle it based on return value
         return None
-
 
 # --- UI Component: Portfolio Summary ---
 def display_portfolio_summary(portfolio_data: Dict):
@@ -79,7 +98,7 @@ def display_portfolio_summary(portfolio_data: Dict):
         risk_profile = risk_profile_raw.capitalize() if risk_profile_raw and isinstance(risk_profile_raw, str) else 'N/A'
         client_name = portfolio_data.get('name', 'Client') # Get name for context
 
-        st.subheader(f"{client_name} Snapshot") # More specific title
+        st.subheader(f"Portfolio Summary of {client_name}") # More specific title
         col1, col2 = st.columns(2)
         with col1:
             st.metric(label="Total Value", value=f"${total_value:,.2f}")
@@ -104,6 +123,7 @@ def display_allocation_bars(holdings_data: list, client_name: str):
         # --- Allocation Data Validation/Calculation ---
         if 'allocation' not in df_holdings.columns:
             logger.warning("Holdings data missing 'allocation' column. Attempting calculation from value.")
+            # Ensure client_context exists before accessing it
             if 'value' in df_holdings.columns and 'client_context' in st.session_state and st.session_state.client_context:
                 total_value = st.session_state.client_context.get('portfolio_value', 0.0)
                 if total_value > 0:
@@ -222,13 +242,14 @@ def manage_sidebar(db_client: PostgresClient):
                         st.session_state.client_id = validated_id # Store validated ID
 
                         # Call the cached function (spinner shown automatically)
+                        # This now includes the DEBUG prints inside it
                         portfolio = get_client_portfolio_cached(validated_id, db_client)
 
                         if portfolio:
                             # Successfully loaded and processed
                             st.session_state.client_context = portfolio
                             st.session_state.portfolio_loaded = True
-                            client_name = portfolio.get('name', validated_id)
+                            client_name = portfolio.get('name', validated_id) # Use name from processed portfolio
                             logger.info(f"Portfolio context loaded successfully for {client_name} ({validated_id})")
                             st.toast(f"Loaded data for {client_name}", icon="✅")
                             # No rerun needed here, form submission handles it
@@ -251,6 +272,7 @@ def manage_sidebar(db_client: PostgresClient):
 
         if st.session_state.portfolio_loaded and st.session_state.client_context:
             # Display portfolio details if loaded successfully
+            # Retrieves name from the potentially modified client_context
             client_name = st.session_state.client_context.get('name', st.session_state.client_id)
             st.divider() # Separator before summary
             display_portfolio_summary(st.session_state.client_context)

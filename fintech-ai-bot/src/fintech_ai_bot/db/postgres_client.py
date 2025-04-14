@@ -114,15 +114,18 @@ class PostgresClient:
         return None
 
     def get_client_portfolio(self, client_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieves a client's portfolio summary."""
+        """Retrieves a client's portfolio summary including their name."""
         if not client_id or not isinstance(client_id, str):
             logger.warning(f"Invalid client_id provided: {client_id}")
             return None
 
+        # --- UPDATED SQL QUERY ---
         query = sql.SQL("""
         SELECT
-            u.id, -- Include user id for potential future use
+            u.id,
             u.risk_profile,
+            u.first_name, -- Added first_name
+            u.last_name,  -- Added last_name
             COALESCE(SUM(h.current_value), 0) as total_value,
             jsonb_agg(jsonb_build_object(
                 'symbol', h.symbol,
@@ -136,10 +139,10 @@ class PostgresClient:
                 END
             )) FILTER (WHERE h.symbol IS NOT NULL) as holdings
         FROM users u
-        LEFT JOIN holdings h ON u.id = h.user_id -- Use LEFT JOIN to include users with no holdings
+        LEFT JOIN holdings h ON u.id = h.user_id
         WHERE u.client_id = %s
-        GROUP BY u.id, u.risk_profile -- Group by user id and risk profile
-        LIMIT 1 -- Ensure only one row per client_id
+        GROUP BY u.id, u.risk_profile, u.first_name, u.last_name -- Added first_name, last_name to GROUP BY
+        LIMIT 1
         """)
         # Note: search_path is set in the connection pool options
 
@@ -147,13 +150,24 @@ class PostgresClient:
             results = self._execute(query, (client_id,), fetch=True)
             if results:
                 result = results[0]
-                logger.info(f"Successfully retrieved portfolio for client {client_id}")
+                # --- PARSE NAME FROM RESULTS ---
+                # Indices: 0=id, 1=risk_profile, 2=first_name, 3=last_name, 4=total_value, 5=holdings
+                first_name = result[2]
+                last_name = result[3]
+                # Combine first and last name, handle None values, fallback to client_id
+                full_name = f"{first_name or ''} {last_name or ''}".strip()
+                client_display_name = full_name if full_name else client_id
+
+                logger.info(f"Successfully retrieved portfolio for client {client_id} ({client_display_name})")
+
+                # --- UPDATED RETURN DICTIONARY ---
                 return {
-                    'user_db_id': result[0], # Internal DB id
+                    'user_db_id': result[0],
                     'risk_profile': result[1] or 'Not specified',
-                    'total_value': float(result[2]),
-                    'holdings': result[3] or [], # Ensure holdings is always a list
-                    'client_id': client_id # Add client_id back for consistency if needed elsewhere
+                    'name': client_display_name, # Included combined name
+                    'total_value': float(result[4]), # Adjusted index
+                    'holdings': result[5] or [], # Adjusted index, ensure it's always a list
+                    'client_id': client_id
                 }
             else:
                 logger.warning(f"No portfolio data found for client {client_id}")
@@ -199,6 +213,6 @@ class PostgresClient:
 # db_client = PostgresClient()
 # portfolio = db_client.get_client_portfolio("CLIENT101")
 # if portfolio:
-#     print(portfolio)
+#     print(portfolio) # Now includes 'name' key
 # db_client.log_client_query("CLIENT101", "Test query", "Test response")
 # Remember to call db_client.close_pool() when the application shuts down if necessary.

@@ -65,71 +65,95 @@ class AgentOrchestrator:
     def _process_db_portfolio(self, client_id: str, raw_portfolio: dict) -> Optional[dict]:
         """
         Processes raw portfolio data from DB into the standard context format,
-        AGGREGATING holdings by symbol.
+        AGGREGATING holdings by symbol and PRESERVING client name.
         """
+        if not raw_portfolio:  # Add check for empty raw_portfolio
+            logger.warning(f"Received empty raw_portfolio for client {client_id} in processing.")
+            return None
         try:
+            # --- CORRECTED NAME INITIALIZATION ---
+            # Get name from raw_portfolio, fallback to client_id if 'name' is missing/empty
+            fetched_name = raw_portfolio.get('name')
+            client_display_name = fetched_name if fetched_name else client_id
+            # --- END CORRECTION ---
+
             portfolio = {
                 "id": client_id,
-                "name": f"Client {client_id[-4:]}" if len(client_id) >= 4 else f"Client {client_id}",
+                "name": client_display_name,  # Use the fetched name with fallback
                 "risk_profile": raw_portfolio.get('risk_profile', 'Not specified') or 'Not specified',
                 "portfolio_value": float(raw_portfolio.get('total_value', 0.0)),
-                "holdings": [], # This will store the FINAL aggregated holdings
-                "last_update": raw_portfolio.get('last_updated', time.strftime("%Y-%m-%d %H:%M:%S"))
+                "holdings": [],  # This will store the FINAL aggregated holdings
+                # Using get with a default for last_update if needed, although postgres_client should provide total_value
+                # For consistency, let's assume last_updated is not a primary field here unless specifically needed
+                # "last_update": raw_portfolio.get('last_updated', time.strftime("%Y-%m-%d %H:%M:%S"))
             }
 
             holdings_data_raw = raw_portfolio.get('holdings', [])
             total_portfolio_value = portfolio['portfolio_value']
-            aggregated_holdings = {} # Use a dict to aggregate: {symbol: total_value}
+            aggregated_holdings = {}  # Use a dict to aggregate: {symbol: total_value}
 
             if isinstance(holdings_data_raw, list):
                 for holding in holdings_data_raw:
-                    if not isinstance(holding, dict) or not holding.get('symbol'):
-                        logger.warning(f"Skipping invalid raw holding item for client {client_id}: {holding}")
+                    # Validate each holding item structure
+                    if not isinstance(holding, dict) or 'symbol' not in holding or 'current_value' not in holding:
+                        logger.warning(f"Skipping invalid raw holding item structure for client {client_id}: {holding}")
                         continue
+
                     symbol = str(holding['symbol']).strip().upper()
                     if not symbol:
                         logger.warning(f"Skipping raw holding item with empty symbol for client {client_id}.")
                         continue
+
                     value = holding.get('current_value', 0.0)
+                    # Validate value type before conversion
                     if not isinstance(value, (int, float)):
-                        logger.warning(f"Invalid value type for symbol {symbol} in client {client_id}. Skipping value.")
-                        value = 0.0
-                    else: value = float(value)
+                        try:
+                            value = float(value)  # Attempt conversion if possible (e.g., from string decimal)
+                        except (ValueError, TypeError):
+                            logger.warning(
+                                f"Invalid value type '{type(value)}' for symbol {symbol} in client {client_id}. Skipping value.")
+                            value = 0.0
+                    else:
+                        value = float(value)  # Ensure it's float
+
                     # Add or update the aggregated value for the symbol
                     aggregated_holdings[symbol] = aggregated_holdings.get(symbol, 0.0) + value
+            elif holdings_data_raw is not None:
+                logger.warning(f"Holdings data for client {client_id} is not a list: {type(holdings_data_raw)}")
 
             # Calculate Allocations and Finalize Holdings List
-            if total_portfolio_value > 0: # Avoid division by zero
+            if total_portfolio_value > 0:  # Avoid division by zero
                 for symbol, total_value_for_symbol in aggregated_holdings.items():
                     allocation = (total_value_for_symbol / total_portfolio_value * 100)
                     portfolio['holdings'].append({
                         "symbol": symbol,
-                        "value": round(total_value_for_symbol, 2), # Store aggregated value
-                        "allocation": round(allocation, 1) # Store calculated allocation
+                        "value": round(total_value_for_symbol, 2),  # Store aggregated value
+                        "allocation": round(allocation, 1)  # Store calculated allocation
                     })
-            else: # Handle zero portfolio value case
-                 for symbol, total_value_for_symbol in aggregated_holdings.items():
-                      portfolio['holdings'].append({
-                          "symbol": symbol,
-                          "value": round(total_value_for_symbol, 2),
-                          "allocation": 0.0 # Allocation is 0 if total value is 0
-                      })
+            else:  # Handle zero portfolio value case
+                for symbol, total_value_for_symbol in aggregated_holdings.items():
+                    portfolio['holdings'].append({
+                        "symbol": symbol,
+                        "value": round(total_value_for_symbol, 2),
+                        "allocation": 0.0  # Allocation is 0 if total value is 0
+                    })
 
             # Sort final aggregated holdings list by value
             portfolio['holdings'].sort(key=lambda x: x['value'], reverse=True)
 
             # Final validation before returning
-            if validate_portfolio_data(portfolio): # Use imported util
+            # Make sure validate_portfolio_data is imported/available
+            if validate_portfolio_data(portfolio):
                 logger.debug(f"Successfully processed and aggregated portfolio for client {client_id}")
                 return portfolio
             else:
-                 logger.error(f"Processed & Aggregated portfolio FAILED validation for client {client_id}.")
-                 return None
+                logger.error(
+                    f"Processed & Aggregated portfolio FAILED validation for client {client_id}. Data: {portfolio}")
+                return None
 
         except Exception as e:
             logger.error(f"Error processing/aggregating raw portfolio for {client_id}: {e}", exc_info=True)
             return None
-    # -----------------------------------------
 
     def _prepare_client_context(self, client_id: Optional[str], client_context_from_ui: Optional[dict]) -> Optional[dict]:
         """Loads, validates, and prepares client context dictionary."""
