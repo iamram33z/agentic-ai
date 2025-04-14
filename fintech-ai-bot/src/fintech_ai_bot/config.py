@@ -73,10 +73,10 @@ class Settings(BaseSettings):
 
     # --- Agent Behavior ---
     max_holdings_in_prompt: int = 10
-    max_doc_tokens_in_prompt: int = 1000
+    max_doc_tokens_in_prompt: int = 5000
     max_financial_summary_len: int = 400
     max_news_summary_len: int = 600
-    max_symbols_to_fetch: int = 5
+    max_symbols_to_fetch: int = 8
     financial_api_delay: float = 0.2
 
     # --- Streamlit App ---

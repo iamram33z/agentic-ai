@@ -1,5 +1,5 @@
 # src/fintech_ai_bot/core/orchestrator.py
-# Final Corrected Version (incorporating holding aggregation)
+# User-provided version (returns single Markdown string)
 
 from typing import Dict, Optional, List, Any
 import time
@@ -13,8 +13,8 @@ from fintech_ai_bot.utils import (
     get_logger,
     format_markdown_response,
     estimate_token_count,
-    generate_error_html,
-    generate_warning_html,
+    generate_error_html, # Still used for error responses
+    generate_warning_html, # Still used for error responses
     log_execution_time,
     validate_portfolio_data,
     validate_query_text,
@@ -218,7 +218,7 @@ class AgentOrchestrator:
          # Keeping the extensive set defined previously, added TODAY
          words = {
              'A', 'ACCEPT', 'ACCOUNT', 'ACCOUNTS', 'ACCURACY', 'ACCURATE', 'ACQUIRE', 'ACTIONABLE', 'ACTIVE',
-             'ACTIVITY',
+             'ACTIVITY','ABOUT', 'ADAPT', 'ADDITIONAL', 'ADDRESS', 'ADJUSTMENT', 'ADJUSTMENTS', 'ADJUSTED', 'ADJUSTING',
              'ADD', 'ADJUST', 'ADMIN', 'ADVANCE', 'AFTER', 'ALERT', 'ALL', 'ALLOCATE', 'ALLOW', 'ALGORITHM', 'ANALYSIS',
              'ANALYZE', 'AND', 'ANNUAL', 'ANY', 'APP', 'APPLICATION', 'APPLY', 'APPROVE', 'ARE', 'AREA', 'ASK', 'ASSET',
              'ASSETS', 'AUDIT', 'AUTO', 'AUTOMATE', 'AVERAGE', 'AVOID', 'BAD', 'BALANCE', 'BANK', 'BASE', 'BASED',
@@ -453,6 +453,9 @@ class AgentOrchestrator:
         client_context = context_dict.get('client')
         if client_context:
             prompt_parts.append("**Client Information**"); prompt_parts.append(f"- Client ID: `{client_context.get('id', 'N/A')}`")
+            # Include name in prompt
+            if client_context.get('name') and client_context['name'] != client_context.get('id'):
+                 prompt_parts.append(f"- Client Name: {client_context['name']}")
             if client_context.get('risk_profile'): prompt_parts.append(f"- Risk Profile: {client_context['risk_profile']}")
             if client_context.get('portfolio_value', 0) > 0: prompt_parts.append(f"- Portfolio Value: ${client_context['portfolio_value']:,.2f}")
             holdings = client_context.get('holdings', []);
@@ -483,35 +486,77 @@ class AgentOrchestrator:
         if relevant_documents:
             prompt_parts.append(relevant_documents) # Header included in string
             prompt_parts.append("\n---\n")
-        prompt_parts.append("Please provide a comprehensive analysis and response based *only* on the information above. Follow the structure defined in your instructions (especially for presenting financial data) and include the standard investment disclaimer.")
+        prompt_parts.append("Please provide a comprehensive analysis and response based *only* on the information above. Follow the structure defined in your instructions (especially for presenting financial data, like using Markdown tables) and include the standard investment disclaimer.") # Added hint for Markdown tables
         final_prompt = "\n".join(prompt_parts); logger.debug(f"Final prompt built. Length: {len(final_prompt)} chars, Est. Tokens: ~{estimate_token_count(final_prompt)}"); return final_prompt
 
     @log_execution_time
     def get_response(self, query: str, client_id: str = None, client_context: dict = None) -> str:
-        """Main method to get a response. Orchestrates context gathering, agent calls, and error handling."""
+        """Main method to get a response. Orchestrates context gathering, agent calls, and error handling. Returns a Markdown string."""
         final_prompt_string = ""
         try:
-            if not validate_query_text(query): logger.warning(f"Invalid query: '{query}'"); return generate_warning_html("Invalid Query", "Please provide a specific question (3-1500 characters).")
+            # Validate query input
+            if not validate_query_text(query):
+                logger.warning(f"Invalid query received: '{query}'")
+                # Return simple error string for UI to handle with type='error'
+                return "Error: Invalid Query Format - Please provide a specific question (3-1500 characters)."
+
             logger.info(f"Processing query for client '{client_id or 'generic'}': '{query[:100]}...'")
+
+            # Prepare context (fetches/processes DB data if needed)
             processed_client_context = self._prepare_client_context(client_id, client_context)
+
+            # Enhance context with agent results (market data, news, docs)
             context_dict = self._get_enhanced_context(query, processed_client_context)
+
+            # Build the final prompt for the coordinator agent
             final_prompt_string = self._build_prompt(context_dict)
-            estimated_tokens = estimate_token_count(final_prompt_string); logger.info(f"Est. coordinator tokens: ~{estimated_tokens}")
-            INPUT_TOKEN_WARNING_THRESHOLD = 100000 # Increased threshold assuming 128k context for Llama3-70b
-            if estimated_tokens > INPUT_TOKEN_WARNING_THRESHOLD: logger.warning(f"Prompt token estimate ({estimated_tokens}) high.")
-            coordinator_agent = self.agents.get('coordinator');
-            if not coordinator_agent: logger.critical("Coordinator agent missing!"); raise RuntimeError("Coordinator agent not initialized.")
-            logger.debug(f"Sending prompt to coordinator ({settings.coordinator_agent_model.id}). Len: {len(final_prompt_string)}")
-            response_content = coordinator_agent.run(final_prompt_string)
-            if response_content: return format_markdown_response(response_content)
-            else: logger.error("Coordinator agent returned None/empty."); return generate_error_html("Processing Error", "AI advisor failed final generation.")
+
+            # Estimate token count and log warning if high
+            estimated_tokens = estimate_token_count(final_prompt_string)
+            logger.info(f"Est. coordinator tokens: ~{estimated_tokens}")
+            # Adjust threshold based on the actual model context window
+            INPUT_TOKEN_WARNING_THRESHOLD = settings.coordinator_agent_model.max_tokens * 0.8 # e.g., 80% of model limit
+            if estimated_tokens > INPUT_TOKEN_WARNING_THRESHOLD:
+                logger.warning(f"Prompt token estimate ({estimated_tokens}) exceeds threshold ({INPUT_TOKEN_WARNING_THRESHOLD}).")
+
+            # Get coordinator agent and run it
+            coordinator_agent = self.agents.get('coordinator')
+            if not coordinator_agent:
+                logger.critical("Coordinator agent missing!")
+                raise RuntimeError("Coordinator agent not initialized.")
+
+            logger.debug(f"Sending prompt to coordinator ({settings.coordinator_agent_model.id}). Length: {len(final_prompt_string)} chars")
+            response_content = coordinator_agent.run(final_prompt_string) # This returns a single string
+
+            # Format and return the response
+            if response_content:
+                # Format basic markdown (line breaks etc.) - assumes coordinator provides structure
+                return format_markdown_response(response_content)
+            else:
+                logger.error("Coordinator agent returned None or empty response.")
+                # Return simple error string
+                return "Error: Processing Error - AI advisor failed the final response generation."
+
+        # --- Error Handling ---
         except ModelProviderError as e:
             error_details = str(e); logger.error(f"Model provider error: {error_details}", exc_info=True)
+            # Specific error checks
             if "context_length_exceeded" in error_details.lower() or (hasattr(e, 'code') and e.code == 400 and "maximum context length" in error_details.lower()):
                 ft = estimate_token_count(final_prompt_string); logger.error(f"Context Length Exceeded. Est. tokens: ~{ft}")
-                return generate_error_html("Request Too Complex", f"Analysis context (~{ft} tokens) exceeded model limits. Simplify request.")
-            elif "model_decommissioned" in error_details.lower(): logger.error(f"Model Decommissioned: {error_details}"); return generate_error_html("AI Model Error", f"AI model unavailable/decommissioned. Check config. Details: {error_details}")
-            elif "tool_use_failed" in error_details.lower(): logger.error(f"Tool Use Failed Error: {error_details}"); return generate_error_html("AI Tool Error", f"Underlying AI tool failed. Details: {error_details}")
-            else: logger.error(f"Failed Prompt Snippet:\n{final_prompt_string[:500]}..."); return generate_error_html("AI Model Error", f"AI model issue. Try again. Details: {error_details}")
-        except (RuntimeError, ValueError) as e: logger.error(f"Internal processing error: {str(e)}", exc_info=True); return generate_error_html("Processing Error", f"Internal error occurred: {e}")
-        except Exception as e: logger.critical(f"Unexpected critical error: {str(e)}", exc_info=True); logger.critical(traceback.format_exc()); return generate_error_html("Unexpected Error", "Unexpected internal error. Contact support.")
+                return f"Error: Request Too Complex - Analysis context (~{ft} tokens) exceeded model limits. Please simplify your request or ask about fewer items."
+            elif "model_decommissioned" in error_details.lower():
+                 logger.error(f"Model Decommissioned: {error_details}");
+                 return f"Error: AI Model Error - The AI model is currently unavailable or decommissioned. Please check configuration. Details: {error_details}"
+            elif "tool_use_failed" in error_details.lower():
+                 logger.error(f"Tool Use Failed Error: {error_details}");
+                 return f"Error: AI Tool Error - An underlying AI tool failed during execution. Details: {error_details}"
+            else:
+                 logger.error(f"Failed Prompt Snippet:\n{final_prompt_string[:500]}...");
+                 return f"Error: AI Model Error - An issue occurred with the AI model. Please try again. Details: {error_details}"
+        except (RuntimeError, ValueError) as e:
+             logger.error(f"Internal processing error: {str(e)}", exc_info=True);
+             return f"Error: Processing Error - An internal error occurred: {e}"
+        except Exception as e:
+             logger.critical(f"Unexpected critical error: {str(e)}", exc_info=True);
+             logger.critical(traceback.format_exc());
+             return "Error: Unexpected Error - An unexpected internal error occurred. Please contact support."
