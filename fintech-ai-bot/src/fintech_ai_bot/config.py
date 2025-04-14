@@ -53,18 +53,15 @@ class Settings(BaseSettings):
     # Agent Models
     # Configuration for different agent models
     news_agent_model: AgentModelConfig = AgentModelConfig(
-        id="llama3-8b-8192", temperature=0.4, max_tokens=800
+        id="llama3-8b-8192", temperature=0.4, max_tokens=1000
     )
     financial_agent_model: AgentModelConfig = AgentModelConfig(
-        id="llama3-8b-8192", temperature=0.1, max_tokens=800
-    )
-    recommendation_agent_model: AgentModelConfig = AgentModelConfig(
-        id="llama3-8b-8192", temperature=0.3, max_tokens=800
+        id="llama3-8b-8192", temperature=0.1, max_tokens=1000
     )
     coordinator_agent_model: AgentModelConfig = AgentModelConfig(
-        id="llama3-70b-8192",
+        id="llama3-8b-8192",
         temperature=0.2,
-        max_tokens=4000
+        max_tokens=4000,
     )
 
     # Agent settings
