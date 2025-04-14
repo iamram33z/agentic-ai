@@ -1,12 +1,13 @@
 # src/fintech_ai_bot/config.py
-# CORRECTED - Updated coordinator model ID
+# CORRECTED - Added app_description setting
 
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, PostgresDsn, HttpUrl
+from pydantic import Field, PostgresDsn, HttpUrl, field_validator
 from dotenv import load_dotenv
 
 # Load .env file from the root of the 'fintech-ai-bot' directory
@@ -47,26 +48,24 @@ class Settings(BaseSettings):
     hf_api_key: str | None = Field(default=None, validation_alias="HUGGINGFACE_API_KEY")
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimension: int = 384
-    # Construct URL dynamically later if model name changes? For now, keep default.
-    embedding_api_url: HttpUrl = Field(default=f"https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2")
+    # Construct URL dynamically later in __init__
+    embedding_api_url: Optional[HttpUrl] = None # Initialize as None
     embedding_request_timeout: int = 15
     vector_search_k: int = 3
 
     # --- LLM / Agent Models ---
-    # Use currently available Groq models (as of early 2024/2025 based on logs)
-    # Consider Llama3 models on Groq
+    # Use currently available Groq models (as of early 2025)
     news_agent_model: AgentModelConfig = AgentModelConfig(
-        id="llama3-8b-8192", temperature=0.4, max_tokens=800 # Llama3 8b is fast
+        id="llama3-8b-8192", temperature=0.4, max_tokens=800
     )
     financial_agent_model: AgentModelConfig = AgentModelConfig(
-        id="llama3-8b-8192", temperature=0.1, max_tokens=800 # Llama3 8b is fast
+        id="llama3-8b-8192", temperature=0.1, max_tokens=800
     )
     recommendation_agent_model: AgentModelConfig = AgentModelConfig(
         id="llama3-8b-8192", temperature=0.3, max_tokens=500
     )
     # *** UPDATED COORDINATOR MODEL ***
     coordinator_agent_model: AgentModelConfig = AgentModelConfig(
-        # id="llama-3.1-70b-versatile", # Decommissioned!
         id="llama3-70b-8192", # Use current Llama3 70b model on Groq
         temperature=0.2,
         max_tokens=4000 # Adjust based on model limits if needed
@@ -83,37 +82,63 @@ class Settings(BaseSettings):
     # --- Streamlit App ---
     app_title: str = "FinTech AI Advisor"
     app_icon: str = "💹"
+    # --- ADDED THIS LINE ---
+    app_description: str = "Your AI partner for financial insights and portfolio analysis." # Default description
     user_avatar: str = "👤"
     assistant_avatar: str = "🤖"
+    cache_ttl_seconds: int = 300 # Cache time-to-live in seconds (e.g., 300 = 5 minutes)
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / '.env',
         env_file_encoding='utf-8',
-        extra='ignore'
+        extra='ignore',
+        # Make Pydantic validate assignments after __init__ as well
+        validate_assignment=True
     )
 
+    # Using __init__ and post-init logic for derived fields
     def __init__(self, **values):
         super().__init__(**values)
-        # Construct derived paths and connection string after loading
+        # Construct derived paths after initial loading
         self.faiss_index_path = self.faiss_dir / "faiss_index"
         self.faiss_docs_path = self.faiss_dir / "documents.json"
         self.policies_dir = self.data_dir / "policies"
         self.products_dir = self.data_dir / "products"
+
         # Construct embedding URL based on model name
         self.embedding_api_url = HttpUrl(f"https://api-inference.huggingface.co/pipeline/feature-extraction/{self.embedding_model_name}")
 
+        # Construct DB connection string if Azure details are present
+        if self.azure_pg_user and self.azure_pg_password and self.azure_pg_host:
+            # Ensure path starts with / if db name present, otherwise empty
+            db_path = f"/{self.azure_pg_db}" if self.azure_pg_db else ""
+            # Pydantic v2 requires URL scheme for PostgresDsn
+            conn_str = f"postgresql://{self.azure_pg_user}:{self.azure_pg_password}@{self.azure_pg_host}:5432{db_path}"
+            try:
+                # Validate and assign using Pydantic's validation
+                self.db_connection_string = PostgresDsn(conn_str)
+            except Exception as e:
+                 # Handle potential validation errors during construction
+                 print(f"WARNING: Error constructing/validating DB connection string: {e}", file=sys.stderr)
+                 self.db_connection_string = None # Ensure it's None if construction fails
+        else:
+            self.db_connection_string = None # Ensure it's None if parts are missing
 
-        if self.azure_pg_user and self.azure_pg_password and self.azure_pg_host and self.azure_pg_db:
-             # Ensure path starts with / if db name present
-             db_path = f"/{self.azure_pg_db}" if self.azure_pg_db else ""
-             self.db_connection_string = PostgresDsn(
-                 f"postgresql://{self.azure_pg_user}:{self.azure_pg_password}@{self.azure_pg_host}{db_path}"
-             )
-
+# Instantiate settings globally
 settings = Settings()
 
-# Add a check after initialization
+# Add checks after initialization
+# These checks run when the module is imported
 if not settings.db_connection_string:
-    print("WARNING: Database connection string could not be constructed. DB operations will fail.", file=sys.stderr)
+    print("WARNING: Database connection string could not be constructed or is missing. DB operations will fail.", file=sys.stderr)
+
 if not settings.hf_api_key:
-    print("WARNING: Hugging Face API key not found. Embedding generation will fail.", file=sys.stderr)
+    print("WARNING: Hugging Face API key (HUGGINGFACE_API_KEY) not found in environment variables or .env file. Embedding generation will fail.", file=sys.stderr)
+
+# Create log directory if it doesn't exist
+if not settings.log_dir.exists():
+    try:
+        settings.log_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Log directory created at: {settings.log_dir}")
+    except Exception as e:
+        print(f"ERROR: Could not create log directory at {settings.log_dir}: {e}", file=sys.stderr)
