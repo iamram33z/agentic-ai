@@ -1,8 +1,4 @@
-# src/fintech_ai_bot/agents/news.py
-# Corrected with Toolkit import and logger
-
-from typing import List, Optional
-from agno.tools.toolkit import Toolkit # Use Toolkit
+# Import necessary Libraries
 from agno.tools.duckduckgo import DuckDuckGoTools
 from .base import BaseAgent
 from fintech_ai_bot.config import settings
@@ -37,7 +33,6 @@ class NewsAgent(BaseAgent):
 
     @staticmethod
     def get_agent_instructions() -> str:
-        # Instructions from original agent.py
         # Assumes the tool function name exposed is 'duckduckgo_search'
         return """Provide ONLY the top 3 most relevant news items MAXIMUM. Be extremely concise. Format each item as:
 1. Headline (Source) - Sentiment: [Positive/Neutral/Negative]

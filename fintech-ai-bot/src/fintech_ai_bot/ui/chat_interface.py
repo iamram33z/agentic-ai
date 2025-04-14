@@ -1,33 +1,20 @@
-# src/fintech_ai_bot/ui/chat_interface.py
-# CORRECTED: Safely handle None value for client_context
-# UPDATED: To handle structured responses from orchestrator
-# RELIES ON: .streamlit/config.toml for theme settings (e.g., dark theme)
-
+# Import necessary libraries
 import streamlit as st
 import pandas as pd
-import traceback # For detailed error logging if needed
 
 # Assuming these imports are correct relative to your project structure
 from fintech_ai_bot.config import settings
 from fintech_ai_bot.core.orchestrator import AgentOrchestrator
 from fintech_ai_bot.utils import get_logger, validate_query_text
 from fintech_ai_bot.db.postgres_client import PostgresClient
-# from typing import List, Dict, Any # Optional for type hinting
 
 logger = get_logger(__name__)
 
-# --- Page Configuration ---
-# Should be called ONLY ONCE in your main app script (e.g., app.py)
-# st.set_page_config(page_title="Fintech AI Bot", layout="wide")
-# --- End Page Configuration ---
-
-
-# --- Structured Content Rendering Logic ---
-
+# Structured Content Rendering Logic
 def render_structured_content(content_list):
     """Renders a list of structured content elements."""
     if not isinstance(content_list, list):
-        st.warning("⚠️ Expected content to be a list for structured response.")
+        #st.warning("⚠️ Expected content to be a list for structured response.")
         # Attempt to display non-list content as markdown or json as fallback
         try:
             st.markdown(str(content_list))
@@ -44,21 +31,17 @@ def render_structured_content(content_list):
             continue
 
         el_type = element.get("type")
-        content = element.get("content") # Used for error/warning types
-        text = element.get("text")       # Used for header/markdown types
-        data = element.get("data")       # Used for table type
+        content = element.get("content")
+        text = element.get("text")
+        data = element.get("data")
 
         try:
             if el_type == "header":
-                level = element.get("level", 4) # Default level
+                level = element.get("level", 4)
                 header_text = text or ""
-                # Render headers as bold markdown for style similar to image
+                # Render headers as bold markdown for style
                 st.markdown(f"**{header_text}**")
-                # Alternative using header levels (might add more spacing):
-                # if level == 1: st.header(header_text)
-                # elif level == 2: st.subheader(header_text)
-                # elif level == 3: st.markdown(f"### {header_text}")
-                # else: st.markdown(f"#### {header_text}")
+
 
             elif el_type == "markdown":
                 markdown_text = text or ""
@@ -73,12 +56,11 @@ def render_structured_content(content_list):
                     except Exception as df_err:
                          logger.error(f"Error creating DataFrame from list: {df_err}", exc_info=True)
                          st.warning("⚠️ Could not create table from data list.")
-                         st.json(data) # Show raw data on failure
+                         st.json(data)
                 elif isinstance(data, pd.DataFrame):
                     df = data
 
                 if df is not None and not df.empty:
-                    # use_container_width=True makes it fit bubble
                     # hide_index=True often looks better for display tables
                     st.dataframe(df, use_container_width=True, hide_index=True)
                 elif df is not None and df.empty:
@@ -106,7 +88,7 @@ def render_structured_content(content_list):
             st.json(element) # Show raw element on render failure
 
 
-# --- Chat History Display Logic ---
+# Chat History Display Logic
 
 def display_chat_messages():
     """
@@ -152,7 +134,7 @@ def display_chat_messages():
                 continue
 
             try:
-                # --- Render based on type ---
+                # Render based on type
                 if msg_type == "structured_response":
                     render_structured_content(content) # Use the dedicated renderer
                 elif msg_type == "error":
@@ -171,7 +153,7 @@ def display_chat_messages():
                 st.error(f"Could not display message content for index {i}.")
 
 
-# --- Input Handling Logic ---
+# Input Handling Logic
 def handle_chat_input(orchestrator: AgentOrchestrator, db_client: PostgresClient):
     """Handles user input, orchestrator calls, structured response display, and logging."""
     prompt = st.chat_input("Ask a financial question...")
@@ -189,16 +171,15 @@ def handle_chat_input(orchestrator: AgentOrchestrator, db_client: PostgresClient
         client_context = st.session_state.get('client_context')
         log_prefix = f"Client '{client_id}'" if client_id else "Unidentified User"
 
-        # --- Input Validation ---
+        # Input Validation
         if not validate_query_text(last_user_prompt):
-            error_msg = "⚠️ **Invalid Query Format:** Query is too short/long or invalid. Please ask a clear question (3-1500 chars)."
+            error_msg = "⚠️ **Invalid Query Format:** Your query must be between 3 and 1500 characters and follow the expected format."
             # Append assistant warning (will align left)
             st.session_state.conversation.append({"role": "assistant", "content": error_msg, "type": "warning"})
-            logger.warning(f"{log_prefix}: Invalid query format blocked by UI: '{last_user_prompt[:60]}...'")
-            st.rerun() # Rerun to display the warning
-            return
+            logger.warning(f"{log_prefix}: Invalid query format blocked by UI. Query: '{last_user_prompt[:60]}...'")
+            st.stop()
 
-        # --- Call Orchestrator and Display Response (within assistant's chat message) ---
+        # Call Orchestrator and Display Response (within assistant's chat message)
         assistant_avatar_url = getattr(settings, 'assistant_avatar', None)
         # Use chat_message context manager to ensure spinner and response appear in the assistant bubble
         with st.chat_message("assistant", avatar=assistant_avatar_url):
@@ -236,10 +217,7 @@ def handle_chat_input(orchestrator: AgentOrchestrator, db_client: PostgresClient
             # Append the assistant's full message (which is the structured list) to history *after* displaying it
             st.session_state.conversation.append(assistant_message_to_log)
 
-            # --- Database Logging ---
-            # Decide what to log for structured responses. Maybe a summary?
-            # For now, log a placeholder indicating a structured response was given,
-            # unless the response itself was primarily an error message.
+            # Database Logging
             is_error_response = isinstance(response_obj, list) and len(response_obj) == 1 and response_obj[0].get("type") == "error"
             response_summary_for_db = "[Structured Response Provided]"
             if is_error_response:
@@ -259,16 +237,3 @@ def handle_chat_input(orchestrator: AgentOrchestrator, db_client: PostgresClient
                          logger.error(f"UI layer: TypeError during DB log for {log_prefix}. Check log_client_query args. Error: {te}", exc_info=False)
                      except Exception as db_log_error:
                          logger.error(f"UI layer: Failed to log interaction to DB for {log_prefix}: {db_log_error}", exc_info=False)
-                 # else: Error response summary logged above if is_error_response is True
-
-        # No st.rerun() needed here; Streamlit handles updates after the 'with' block.
-
-
-# --- Example Usage Placeholder ---
-# (Keep the placeholder for potential standalone testing as before)
-# if __name__ == "__main__":
-#     # ... Placeholder initializations ...
-#     # st.title("Financial Advisor Chat (UI Module Test)")
-#     # display_chat_messages()
-#     # handle_chat_input(st.session_state.orchestrator, st.session_state.db_client)
-#     pass

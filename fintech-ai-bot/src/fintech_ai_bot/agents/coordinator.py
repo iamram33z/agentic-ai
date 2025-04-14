@@ -1,8 +1,5 @@
-# src/fintech_ai_bot/agents/coordinator.py
-# Updated instructions for Financial Data presentation
-
+# Import necessary Libraries
 from typing import List, Optional
-from agno.tools.toolkit import Toolkit
 from fintech_ai_bot.utils import get_logger
 from .base import BaseAgent, AgnoAgent
 from fintech_ai_bot.config import settings
@@ -35,7 +32,7 @@ class CoordinatorAgent(BaseAgent):
                 role=self.role,
                 model=self.model,
                 tools=self.tools,
-                team=self.agno_team, # Pass the list of other Agno agents
+                team=self.agno_team,
                 instructions=self.instructions,
                 markdown=True
             )
@@ -55,7 +52,7 @@ class CoordinatorAgent(BaseAgent):
 
     @staticmethod
     def get_agent_instructions() -> str:
-        # *** REVISED Financial Data Instruction ***
+        # Financial Data Instruction
         return """Synthesize the provided information into a coherent report answering the user's query. Use clear MARKDOWN formatting.
 
 Structure:

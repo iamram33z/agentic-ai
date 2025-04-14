@@ -1,8 +1,4 @@
-# src/fintech_ai_bot/agents/financial.py
-# Reverted to original init style and instructions
-
-from typing import List, Optional
-from agno.tools.toolkit import Toolkit # Keep consistent import
+# Import necessary Libraries
 from agno.tools.yfinance import YFinanceTools
 from .base import BaseAgent
 from fintech_ai_bot.config import settings
@@ -16,9 +12,6 @@ class FinancialAgent(BaseAgent):
     def __init__(self):
         """Initializes the FinancialAgent with YFinanceTools."""
         try:
-            # *** REVERTED INITIALIZATION to match original agent.py ***
-            # Assuming YFinanceTools init accepts these boolean flags
-            # AND that YFinanceTools itself is compatible with the Toolkit type hint.
             yfinance_tools = YFinanceTools(
                 stock_price=True,
                 stock_fundamentals=False, # Keep false by default
@@ -49,7 +42,6 @@ class FinancialAgent(BaseAgent):
 
     @staticmethod
     def get_agent_instructions() -> str:
-        # *** REVERTED INSTRUCTIONS to match original agent.py ***
         # Asking the model to generate the final table directly.
         return """Provide key financial data for the requested symbol(s) in a *compact* markdown table. Include ONLY these metrics:
 | Metric          | Value      |

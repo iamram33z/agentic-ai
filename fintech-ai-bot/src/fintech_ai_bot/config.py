@@ -1,13 +1,9 @@
-# src/fintech_ai_bot/config.py
-# CORRECTED - Added app_description setting
-
-import os
+# Importing necessary libraries
 import sys
 from pathlib import Path
 from typing import Optional
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, PostgresDsn, HttpUrl, field_validator
+from pydantic import Field, PostgresDsn, HttpUrl
 from dotenv import load_dotenv
 
 # Load .env file from the root of the 'fintech-ai-bot' directory
@@ -15,12 +11,12 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
 
 class AgentModelConfig(BaseSettings):
-    id: str = "llama3-8b-8192" # Default to a common, available model
+    id: str = "llama3-8b-8192"
     temperature: float = 0.5
-    max_tokens: int = 1000 # Default max_tokens
+    max_tokens: int = 1000
 
 class Settings(BaseSettings):
-    # --- Project Paths ---
+    # Project directories
     project_root: Path = Field(default=PROJECT_ROOT)
     log_dir: Path = Field(default=PROJECT_ROOT / "logs")
     faiss_dir: Path = Field(default=PROJECT_ROOT / "faiss")
@@ -30,31 +26,32 @@ class Settings(BaseSettings):
     policies_dir: Path | None = None
     products_dir: Path | None = None
 
-    # --- Logging ---
+    # Logging
     log_level: str = "INFO"
 
-    # --- Database ---
+    # Database settings
     azure_pg_host: str | None = None
     azure_pg_db: str | None = None
     azure_pg_user: str | None = None
     azure_pg_password: str | None = None
     azure_pg_ssl: str = "require"
     azure_pg_schema: str = "profiles"
-    db_connection_string: Optional[PostgresDsn] = None # Made Optional explicitly
+    db_connection_string: Optional[PostgresDsn] = None
     db_max_retries: int = 3
     db_retry_delay: float = 1.0
 
-    # --- Vector Store & Embeddings ---
+    # Vector database settings
     hf_api_key: str | None = Field(default=None, validation_alias="HUGGINGFACE_API_KEY")
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimension: int = 384
+
     # Construct URL dynamically later in __init__
-    embedding_api_url: Optional[HttpUrl] = None # Initialize as None
+    embedding_api_url: Optional[HttpUrl] = None
     embedding_request_timeout: int = 15
     vector_search_k: int = 3
 
-    # --- LLM / Agent Models ---
-    # Use currently available Groq models (as of early 2025)
+    # Agent Models
+    # Configuration for different agent models
     news_agent_model: AgentModelConfig = AgentModelConfig(
         id="llama3-8b-8192", temperature=0.4, max_tokens=800
     )
@@ -62,37 +59,34 @@ class Settings(BaseSettings):
         id="llama3-8b-8192", temperature=0.1, max_tokens=800
     )
     recommendation_agent_model: AgentModelConfig = AgentModelConfig(
-        id="llama3-8b-8192", temperature=0.3, max_tokens=500
+        id="llama3-8b-8192", temperature=0.3, max_tokens=800
     )
-    # *** UPDATED COORDINATOR MODEL ***
     coordinator_agent_model: AgentModelConfig = AgentModelConfig(
-        id="llama3-70b-8192", # Use current Llama3 70b model on Groq
+        id="llama3-70b-8192",
         temperature=0.2,
-        max_tokens=4000 # Adjust based on model limits if needed
+        max_tokens=4000
     )
 
-    # --- Agent Behavior ---
+    # Agent settings
     max_holdings_in_prompt: int = 10
     max_doc_tokens_in_prompt: int = 5000
-    max_financial_summary_len: int = 400
+    max_financial_summary_len: int = 500
     max_news_summary_len: int = 600
-    max_symbols_to_fetch: int = 8
+    max_symbols_to_fetch: int = 10
     financial_api_delay: float = 0.2
 
-    # --- Streamlit App ---
+    # Streamlit settings
     app_title: str = "FinTech AI Advisor"
     app_icon: str = "💹"
-    # --- ADDED THIS LINE ---
-    app_description: str = "Your AI partner for financial insights and portfolio analysis." # Default description
-    user_avatar: str = "👤"
-    assistant_avatar: str = "🤖"
-    cache_ttl_seconds: int = 300 # Cache time-to-live in seconds (e.g., 300 = 5 minutes)
+    app_description: str = "Your AI partner for financial insights and portfolio analysis."
+    user_avatar: str = "🧔🏻‍♂️"
+    assistant_avatar: str = "🪼"
+    cache_ttl_seconds: int = 300
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / '.env',
         env_file_encoding='utf-8',
         extra='ignore',
-        # Make Pydantic validate assignments after __init__ as well
         validate_assignment=True
     )
 

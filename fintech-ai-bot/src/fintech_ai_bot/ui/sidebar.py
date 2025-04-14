@@ -1,7 +1,4 @@
-# src/fintech_ai_bot/ui/sidebar.py
-# ENHANCED UI/UX: Added st.form, dividers, theme-adaptive chart
-# + TEMPORARY DEBUGGING for client name issue
-
+# Import necessary libraries
 import streamlit as st
 from typing import Optional, Dict, Any
 import pandas as pd
@@ -9,7 +6,8 @@ import plotly.express as px
 from fintech_ai_bot.config import settings
 from fintech_ai_bot.db.postgres_client import PostgresClient
 from fintech_ai_bot.utils import get_logger, validate_client_id, validate_portfolio_data
-from fintech_ai_bot.core.orchestrator import AgentOrchestrator # Still needed for processing logic temporarily
+from fintech_ai_bot.core.orchestrator import AgentOrchestrator, \
+    _process_db_portfolio
 
 logger = get_logger(__name__)
 
@@ -46,7 +44,7 @@ def get_client_portfolio_cached(client_id: str, _db_client: PostgresClient) -> O
             # !! This is the likely suspect !!
             # !! IMPORTANT: Calling a private method of another class like this is poor practice.
             # This processing logic should ideally be moved to a shared utility or service layer.
-            processed_portfolio = AgentOrchestrator._process_db_portfolio(None, validated_id, raw_portfolio)
+            processed_portfolio = _process_db_portfolio(validated_id, raw_portfolio)
 
         except AttributeError:
              logger.error("Cannot call _process_db_portfolio statically. Refactoring needed.")

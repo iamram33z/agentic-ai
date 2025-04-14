@@ -1,14 +1,12 @@
-# src/fintech_ai_bot/agents/base.py
-# (Using Toolkit type hint)
-
+# Import Libraries
 from abc import ABC, abstractmethod
 from typing import List, Optional
-from agno.tools.toolkit import Toolkit # Use Toolkit
+from agno.tools.toolkit import Toolkit
 from agno.agent import Agent as AgnoAgent
 from agno.models.base import Model
 from agno.models.groq import Groq
 from agno.run.response import RunResponse
-from fintech_ai_bot.config import AgentModelConfig # Import only needed config part
+from fintech_ai_bot.config import AgentModelConfig
 from fintech_ai_bot.utils import get_logger
 
 logger = get_logger(__name__)
