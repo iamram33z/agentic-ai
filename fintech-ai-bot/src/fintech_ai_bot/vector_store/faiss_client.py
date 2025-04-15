@@ -1,25 +1,30 @@
-# faiss_client.py
+# faiss_client.py (Corrected add_documents check)
 
 import faiss
 import numpy as np
 import json
-from typing import List, Dict, Optional, Generator
+from typing import List, Dict, Optional, Generator, Tuple
 from pathlib import Path
 import time
 import torch
-from transformers import pipeline, AutoTokenizer # Import AutoTokenizer for chunking estimate
+from transformers import pipeline, AutoTokenizer, PreTrainedTokenizerBase
 import logging
-import math # For ceiling division
+import math
+import gc  # Garbage collection
 
 # --- Logger Setup ---
 try:
     from fintech_ai_bot.config import settings
-    from fintech_ai_bot.utils import get_logger
+    from fintech_ai_bot.utils import get_logger, log_execution_time, generate_error_html
+
     logger = get_logger(__name__)
 except ImportError as import_err:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
-    logger.warning(f"Could not import from fintech_ai_bot modules (Error: {import_err}). Using basic fallback logger and mock settings.")
+    logger.warning(
+        f"Could not import from fintech_ai_bot modules (Error: {import_err}). Using basic fallback logger and mock settings.")
+
+
     class MockSettings:
         faiss_index_path = Path("./faiss_index").resolve()
         faiss_docs_path = Path("./documents.json").resolve()
@@ -29,38 +34,101 @@ except ImportError as import_err:
         vector_search_k = 3
         policies_dir = Path("./data/policies").resolve()
         products_dir = Path("./data/products").resolve()
-        max_doc_chars_in_prompt = 5000 * 5
+        max_doc_chars_in_prompt = 25000
         log_dir = Path("./logs").resolve()
-        # Add setting for chunking (optional, can hardcode)
-        chunk_size_chars: int = 1500 # Approximate target size in characters
-        chunk_overlap_chars: int = 200 # Overlap in characters
+        chunk_size_tokens: int = 450
+        chunk_overlap_tokens: int = 50
+        embedding_batch_size: int = 32
+
+
     settings = MockSettings()
+
+
+    def log_execution_time(func):
+        return func  # Mock decorator
+
+
+    def generate_error_html(msg, det=""):
+        return f"ERROR: {msg} Details: {det}"  # Mock error func
+
+
 # --- End Logger Setup ---
 
 
-# --- Text Chunking Helper ---
-def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> Generator[str, None, None]:
-    """Yields overlapping chunks of text."""
-    if not text or chunk_size <= 0:
-        return
-    if chunk_overlap >= chunk_size:
-        logger.warning(f"Chunk overlap ({chunk_overlap}) >= chunk size ({chunk_size}). Setting overlap to 0.")
-        chunk_overlap = 0
+# --- Enhanced Text Chunking Helper ---
+class TokenChunker:
+    """Splits text into chunks based on token count using a Hugging Face tokenizer."""
 
-    start = 0
-    text_len = len(text)
-    while start < text_len:
-        end = start + chunk_size
-        yield text[start:end]
-        # Move start forward, accounting for overlap
-        start += chunk_size - chunk_overlap
-        # Break if overlap makes start point negative or static (shouldn't happen with check above)
-        if start >= text_len or start < 0 or (chunk_size - chunk_overlap <= 0):
-            break
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, chunk_size: int, chunk_overlap: int):
+        if not isinstance(tokenizer, PreTrainedTokenizerBase):
+            raise TypeError("Tokenizer must be valid.")
+        if not isinstance(chunk_size, int) or chunk_size <= 0:
+            raise ValueError("Chunk size positive int.")
+        if not isinstance(chunk_overlap, int) or chunk_overlap < 0:
+            raise ValueError("Chunk overlap non-negative int.")
+        if chunk_overlap >= chunk_size:
+            logger.warning(f"Overlap({chunk_overlap})>=Size({chunk_size}). Adjusting->{chunk_size // 3}.")
+            chunk_overlap = chunk_size // 3
+
+        self.tokenizer = tokenizer
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        model_max_len = getattr(tokenizer, 'model_max_length', None)
+        self.effective_chunk_size = chunk_size
+        if model_max_len and model_max_len < chunk_size:
+            self.effective_chunk_size = model_max_len
+            logger.info(f"Chunk size adjusted to tokenizer max length: {self.effective_chunk_size}")
+        logger.info(f"TokenChunker initialized: Size={self.effective_chunk_size}, Overlap={self.chunk_overlap}")
+
+    def split_text(self, text: str) -> List[str]:
+        """Splits text into chunks respecting token limits."""
+        if not text or not isinstance(text, str):
+            logger.warning("Empty/non-string for chunking.")
+            return []
+
+        try:
+            tokens = self.tokenizer.encode(text, add_special_tokens=False)
+        except Exception as e:
+            logger.error(f"Tokenizer encode failed: {e}", exc_info=True)
+            return [text] if 0 < len(text) < self.effective_chunk_size * 4 else []
+
+        token_count = len(tokens)
+        chunks = []
+        start_token_idx = 0
+
+        if token_count == 0:
+            logger.warning("Zero tokens after encoding.")
+            return []
+
+        if token_count <= self.effective_chunk_size:
+            return [self.tokenizer.decode(tokens, skip_special_tokens=True).strip()]
+
+        step_size = self.effective_chunk_size - self.chunk_overlap
+        if step_size <= 0:
+            logger.error("Invalid Chunker state: Step <= 0.")
+            return [self.tokenizer.decode(tokens[:self.effective_chunk_size], skip_special_tokens=True).strip()]
+
+        while start_token_idx < token_count:
+            end_token_idx = min(start_token_idx + self.effective_chunk_size, token_count)
+            chunk_token_ids = tokens[start_token_idx:end_token_idx]
+            chunk_text = self.tokenizer.decode(chunk_token_ids, skip_special_tokens=True).strip()
+
+            if chunk_text:
+                chunks.append(chunk_text)
+            else:
+                logger.debug(f"Skipping empty chunk: indices {start_token_idx}-{end_token_idx}.")
+
+            start_token_idx += step_size
+            if end_token_idx == token_count:
+                break
+
+        logger.debug(f"Split text into {len(chunks)} chunks.")
+        return chunks
 
 
+# --- FAISS Client Class ---
 class FAISSClient:
-    """Client for managing FAISS index and document storage using local embeddings with mean pooling and text chunking."""
+    """Manages FAISS index using local embeddings, chunking, and pooling."""
 
     def __init__(self):
         self.index_path: Path = settings.faiss_index_path
@@ -69,524 +137,523 @@ class FAISSClient:
         self.model_name: str = settings.embedding_model_name
         self.hf_api_key: Optional[str] = settings.hf_api_key
         self.k: int = settings.vector_search_k
-        # Chunking settings (from config or default)
-        self.chunk_size = getattr(settings, 'chunk_size_chars', 1500)
-        self.chunk_overlap = getattr(settings, 'chunk_overlap_chars', 200)
-
+        self.chunk_size: int = settings.chunk_size_tokens
+        self.chunk_overlap: int = settings.chunk_overlap_tokens
+        self.embedding_batch_size: int = settings.embedding_batch_size
 
         self.index: Optional[faiss.Index] = None
-        self.documents: List[Dict] = [] # Stores metadata for EACH CHUNK
+        self.documents: List[Dict] = []
         self.feature_extractor = None
-        self.tokenizer = None # To store the tokenizer for potential future use
+        self.tokenizer: Optional[PreTrainedTokenizerBase] = None
+        self.chunker: Optional[TokenChunker] = None
+        self.is_initialized: bool = False
 
+        # --- Initialization ---
+        logger.info("Initializing FAISSClient...")
         if self.dimension <= 0:
-             logger.critical("Embedding dimension must be positive. Cannot initialize FAISSClient.")
-             raise ValueError("Embedding dimension must be positive.")
+            raise ValueError("Embedding dimension must be positive.")
 
-        self._initialize_embedding_pipeline()
-        # Only initialize store if pipeline init was successful
-        if self.feature_extractor:
-            self._initialize_store()
+        self._initialize_embedding_pipeline_and_tokenizer()
+
+        if self.feature_extractor and self.tokenizer:
+            try:
+                self.chunker = TokenChunker(self.tokenizer, self.chunk_size, self.chunk_overlap)
+                self._initialize_store()  # Calls _load_initial_documents if index created
+
+                if self.index is not None:
+                    self.is_initialized = True
+                    logger.info("FAISSClient initialized successfully.")
+                else:
+                    logger.error("FAISS store initialization failed. Client unusable.")
+            except ValueError as chunker_err:
+                logger.critical(f"Failed TokenChunker init: {chunker_err}")
+                raise
+            except Exception as store_err:
+                logger.critical(f"Failed store initialization: {store_err}", exc_info=True)
         else:
-            logger.error("Embedding pipeline failed to initialize. FAISS store cannot be initialized.")
-            self.index = None
-            self.documents = []
+            logger.error("Pipeline/tokenizer failed init. Client unusable.")
 
+        if not self.is_initialized:
+            logger.warning("FAISSClient did not initialize successfully.")
 
-    def _initialize_embedding_pipeline(self):
-        """Initializes the Hugging Face feature extraction pipeline and tokenizer."""
+    def _initialize_embedding_pipeline_and_tokenizer(self):
+        """Initializes the Hugging Face pipeline and tokenizer."""
         try:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
-            logger.info(f"Initializing feature extraction pipeline '{self.model_name}' on device '{device}'.")
+            logger.info(f"Initializing '{self.model_name}' on {device}.")
             print(f"Device set to use {device}")
+
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, token=self.hf_api_key)
+            logger.info("Tokenizer initialized.")
 
             self.feature_extractor = pipeline(
                 "feature-extraction",
                 model=self.model_name,
-                token=self.hf_api_key if self.hf_api_key else None,
+                tokenizer=self.tokenizer,
+                token=self.hf_api_key,
                 device=device
-            )
-            # Load tokenizer separately for potential use (like more accurate chunking)
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name,
-                token=self.hf_api_key if self.hf_api_key else None
             )
 
             try:
                 _ = self.feature_extractor("test")
-                logger.info("Feature extraction pipeline initialized and tested successfully.")
+                logger.info("Pipeline initialized and tested.")
             except Exception as test_e:
-                logger.warning(f"Feature extraction pipeline initialized but test run failed: {test_e}", exc_info=True)
-
+                logger.warning(f"Pipeline test failed: {test_e}", exc_info=True)
         except Exception as e:
-            logger.critical(f"Failed to initialize feature extraction pipeline or tokenizer: {e}", exc_info=True)
+            logger.critical(f"Failed init: {e}", exc_info=True)
             self.feature_extractor = None
             self.tokenizer = None
 
-
     def _initialize_store(self):
         """Loads or creates the FAISS index and chunk document store."""
-        # (Keep implementation from previous version, checks dimensions etc.)
         try:
             self.index_path.parent.mkdir(parents=True, exist_ok=True)
 
             if self.index_path.exists() and self.documents_path.exists():
-                logger.info(f"Loading existing FAISS index from {self.index_path}")
+                logger.info(f"Loading existing index from {self.index_path}")
                 try:
-                     self.index = faiss.read_index(str(self.index_path))
-                except Exception as read_err:
-                     logger.critical(f"Failed to read FAISS index file {self.index_path}: {read_err}", exc_info=True)
-                     self.index = None
-                     self.documents = []
-                     logger.warning("Treating store as non-existent due to index read error.")
-                     raise # Reraise to be caught by the outer block
+                    self.index = faiss.read_index(str(self.index_path))
+                except Exception as e:
+                    logger.critical(f"Failed read index: {e}", exc_info=True)
+                    self.index = None
+                    self.documents = []
+                    logger.warning("Treating as non-existent.")
+                    raise
 
-                if self.index is not None and self.index.d != self.dimension:
-                     logger.critical(f"Loaded index dimension ({self.index.d}) does not match configured dimension ({self.dimension}). Please delete the old index files in '{self.index_path.parent}'. Aborting.")
-                     raise ValueError(f"Index dimension mismatch: Loaded={self.index.d}, Config={self.dimension}. Delete old files.")
+                if self.index and self.index.d != self.dimension:
+                    logger.critical(f"Index dim ({self.index.d}) != config ({self.dimension}). Delete files.")
+                    raise ValueError("Index dim mismatch. Delete files.")
 
-                logger.info(f"Loading existing chunk documents from {self.documents_path}")
+                logger.info(f"Loading existing chunk docs from {self.documents_path}")
                 with open(self.documents_path, 'r', encoding='utf-8') as f:
-                    self.documents = json.load(f) # Should contain chunk metadata
-                logger.info(f"Loaded {len(self.documents)} chunk documents and index with {self.index.ntotal} vectors.")
-                if self.index is not None and self.index.ntotal != len(self.documents):
-                    logger.warning(f"Index vector count ({self.index.ntotal}) mismatch with chunk document count ({len(self.documents)}). Search results may be inconsistent. Consider re-indexing.")
+                    self.documents = json.load(f)
 
+                logger.info(
+                    f"Loaded {len(self.documents)} chunks & index ({self.index.ntotal if self.index else 'N/A'} vectors).")
+
+                if self.index and self.index.ntotal != len(self.documents):
+                    logger.warning(
+                        f"Index count ({self.index.ntotal}) != doc count ({len(self.documents)}). Re-index suggested.")
             else:
-                 if self.index is None: # Check if we need to create a new index
-                     logger.info(f"Creating new FAISS index ({self.dimension} dimensions) and chunk document store.")
-                     self.index = faiss.IndexFlatL2(self.dimension)
-                     self.documents = [] # List to store metadata about each chunk
-                     self._load_initial_documents()
-                 else:
-                     logger.warning("Index exists but documents file might be missing. State might be inconsistent.")
-
+                if self.index is None:
+                    logger.info(f"Creating new FAISS index ({self.dimension}D) & store.")
+                    self.index = faiss.IndexFlatL2(self.dimension)
+                    self.documents = []
+                    self._load_initial_documents()
+                else:
+                    logger.warning("Index exists but docs file missing?")
         except ValueError as ve:
-             logger.critical(str(ve))
-             self.index = None
-             self.documents = []
-             raise ve
+            logger.critical(str(ve))
+            self.index = None
+            self.documents = []
+            raise ve
         except Exception as e:
-            logger.critical(f"FAISS store initialization failed: {e}", exc_info=True)
-            logger.warning("Store initialization failed. FAISS client will have no index or documents.")
+            logger.critical(f"Store init failed: {e}", exc_info=True)
+            logger.warning("FAISS has no index/docs.")
             self.index = None
             self.documents = []
 
-
+    @log_execution_time
     def _get_embeddings(self, texts: List[str]) -> Optional[np.ndarray]:
-        """
-        Gets embeddings for a list of texts (presumably chunks).
-        Applies MEAN POOLING. Handles 3D output. Returns None if any text fails.
-        """
-        # (Keep implementation from the previous version - it handles pooling and 3D)
+        """Gets embeddings for text chunks using batched processing and mean pooling."""
         if self.feature_extractor is None:
-            logger.error("Feature extraction pipeline is not initialized. Cannot get embeddings.")
+            logger.error("Pipeline not ready.")
             return None
+
         if not texts or not all(isinstance(t, str) for t in texts):
-             logger.error(f"Invalid input to _get_embeddings: Expected list of strings, got {type(texts)}")
-             return None
-        valid_texts = [t for t in texts if t.strip()]
-        if not valid_texts:
-             logger.warning("Input texts list contains only empty strings.")
-             return np.array([], dtype=np.float32).reshape(0, self.dimension)
-        if len(valid_texts) < len(texts):
-            logger.warning(f"Removed {len(texts) - len(valid_texts)} empty strings from input.")
-
-        try:
-            logger.debug(f"Generating token embeddings for {len(valid_texts)} text chunks using local pipeline.")
-            token_embeddings_output = self.feature_extractor(valid_texts)
-
-            if len(token_embeddings_output) != len(valid_texts):
-                 logger.error(f"Pipeline output length ({len(token_embeddings_output)}) does not match valid input text length ({len(valid_texts)}).")
-                 return None
-
-            pooled_sentence_embeddings = []
-            processing_failed = False
-
-            for i, sentence_token_output in enumerate(token_embeddings_output):
-                if processing_failed: break
-
-                token_embeddings_array = None
-
-                try:
-                    if not isinstance(sentence_token_output, list) or not sentence_token_output:
-                         logger.warning(f"Pipeline output for text chunk #{i+1} ('{valid_texts[i][:50]}...') is not a non-empty list. Skipping.")
-                         processing_failed = True
-                         continue
-
-                    temp_array = np.array(sentence_token_output, dtype=np.float32)
-
-                    if temp_array.ndim == 3 and temp_array.shape[0] == 1:
-                         logger.debug(f"Detected 3D shape {temp_array.shape} for chunk #{i+1}. Squeezing batch dimension.")
-                         token_embeddings_array = temp_array.squeeze(axis=0)
-                    elif temp_array.ndim == 2:
-                         logger.debug(f"Detected 2D shape {temp_array.shape} for chunk #{i+1}.")
-                         token_embeddings_array = temp_array
-                    else:
-                         logger.warning(f"Token embeddings array for chunk #{i+1} ('{valid_texts[i][:50]}...') has unexpected shape {temp_array.shape} after conversion. Expected 2D or 3D with batch=1. Skipping.")
-                         processing_failed = True
-                         continue
-
-                    if token_embeddings_array is None or token_embeddings_array.ndim != 2 or token_embeddings_array.shape[0] == 0:
-                        logger.warning(f"Failed to obtain valid 2D token embedding array for chunk #{i+1} (Shape: {token_embeddings_array.shape if token_embeddings_array is not None else 'None'}). Skipping pooling.")
-                        processing_failed = True
-                        continue
-
-                    sentence_embedding = np.mean(token_embeddings_array, axis=0)
-
-                    if sentence_embedding.ndim == 1 and sentence_embedding.shape[0] == self.dimension:
-                        pooled_sentence_embeddings.append(sentence_embedding)
-                    else:
-                        logger.warning(f"Pooled embedding for chunk #{i+1} ('{valid_texts[i][:50]}...') has unexpected shape {sentence_embedding.shape}. Expected ({self.dimension},). Skipping.")
-                        processing_failed = True
-                        continue
-
-                except ValueError as ve:
-                    logger.error(f"Could not convert token embeddings to array for chunk #{i+1} ('{valid_texts[i][:50]}...') due to inconsistent structure: {ve}. Skipping.")
-                    processing_failed = True
-                    continue
-                except Exception as pool_exc:
-                    logger.error(f"Error during processing/pooling for chunk #{i+1} ('{valid_texts[i][:50]}...'): {pool_exc}", exc_info=True)
-                    processing_failed = True
-                    continue
-            # --- End of loop ---
-
-            if processing_failed:
-                logger.error("Aborting embedding generation as not all text chunks could be processed.")
-                return None
-
-            if not pooled_sentence_embeddings:
-                logger.error("No embeddings generated despite no explicit failures detected.")
-                return None
-
-            final_embeddings_array = np.array(pooled_sentence_embeddings, dtype=np.float32)
-
-            if final_embeddings_array.shape != (len(valid_texts), self.dimension):
-                 logger.error(f"Final embedding array shape {final_embeddings_array.shape} mismatch. Expected ({len(valid_texts)}, {self.dimension}).")
-                 return None
-
-            logger.debug(f"Generated pooled embeddings of final shape: {final_embeddings_array.shape}")
-            return final_embeddings_array
-
-        except IndexError as idx_err:
-             # Catch index errors specifically from the pipeline if text is too long despite chunking attempt
-             logger.error(f"IndexError during pipeline processing, likely due to excessive token length in a chunk: {idx_err}", exc_info=True)
-             return None
-        except Exception as e:
-            logger.error(f"Unexpected error during embedding generation: {e}", exc_info=True)
+            logger.error(f"Invalid input type.")
             return None
 
+        valid_texts = [t for t in texts if t.strip()]
+        texts_were_empty = len(valid_texts) < len(texts)
+
+        if not valid_texts:
+            logger.warning("Input only empty strings.")
+            return np.array([], dtype=np.float32).reshape(0, self.dimension)
+
+        if texts_were_empty:
+            logger.warning(f"Removed {len(texts) - len(valid_texts)} empty strings.")
+
+        all_pooled = []
+        total_texts = len(valid_texts)
+        batch_size = self.embedding_batch_size
+        num_batches = math.ceil(total_texts / batch_size)
+
+        logger.info(f"Embedding {total_texts} chunks in {num_batches} batches (size {batch_size}).")
+
+        for i in range(num_batches):
+            batch_start = i * batch_size
+            batch_end = min((i + 1) * batch_size, total_texts)
+            batch_texts = valid_texts[batch_start:batch_end]
+
+            logger.debug(f"Processing batch {i + 1}/{num_batches}...")
+            start_batch_time = time.monotonic()
+
+            try:
+                output = self.feature_extractor(batch_texts)
+                batch_pooled = []
+                failed = False
+
+                if len(output) != len(batch_texts):
+                    logger.error(f"Batch {i + 1}: Output len!=input. Abort.")
+                    return None
+
+                for j, item_output in enumerate(output):
+                    arr = None
+                    try:
+                        temp = np.array(item_output, dtype=np.float32)
+                    except ValueError as ve:
+                        logger.error(f"B{i + 1}, I{j + 1}: Array Err: {ve}. Skip.")
+                        failed = True
+                        break
+
+                    if temp.ndim == 3 and temp.shape[0] == 1:
+                        arr = temp.squeeze(axis=0)
+                    elif temp.ndim == 2:
+                        arr = temp
+                    else:
+                        logger.warning(f"B{i + 1}, I{j + 1}: Bad shape {temp.shape}. Skip.")
+                        failed = True
+                        break
+
+                    if arr is None or arr.ndim != 2 or arr.shape[0] == 0:
+                        logger.warning(
+                            f"B{i + 1}, I{j + 1}: Invalid 2D arr (Shape:{arr.shape if arr is not None else 'N/A'}). Skip.")
+                        failed = True
+                        break
+
+                    pooled = np.mean(arr, axis=0)
+
+                    if pooled.ndim == 1 and pooled.shape[0] == self.dimension:
+                        batch_pooled.append(pooled)
+                    else:
+                        logger.warning(f"B{i + 1}, I{j + 1}: Pooled shape {pooled.shape} invalid. Skip.")
+                        failed = True
+                        break
+
+                if failed:
+                    logger.error(f"Batch {i + 1} failed. Abort.")
+                    return None
+
+                all_pooled.extend(batch_pooled)
+                batch_duration = time.monotonic() - start_batch_time
+                logger.debug(f"Batch {i + 1} OK ({batch_duration:.2f}s).")
+                del output, batch_pooled, arr, pooled, temp
+                gc.collect()
+            except IndexError as idx:
+                logger.error(f"Batch {i + 1}: IndexError: {idx}", exc_info=True)
+                return None
+            except Exception as e:
+                logger.error(f"Batch {i + 1}: Unexpected error: {e}", exc_info=True)
+                return None
+
+        if len(all_pooled) != total_texts:
+            logger.error(f"Final count mismatch.")
+            return None
+
+        final_array = np.array(all_pooled, dtype=np.float32)
+
+        if final_array.shape != (total_texts, self.dimension):
+            logger.error(f"Final shape mismatch.")
+            return None
+
+        logger.info(f"Successfully embedded {total_texts} chunks.")
+        return final_array
 
     def _save_store(self):
         """Saves the index and chunk documents to disk."""
-        # (Keep implementation from previous version)
         if self.index is None:
-            logger.error("Cannot save, FAISS index is not initialized.")
+            logger.error("Cannot save, FAISS index object is None.")
             return
-        if self.index.ntotal <= 0 and not self.documents: # Save empty docs file only if index is also empty
-             logger.info("Skipping saving empty FAISS index and documents.")
-             # Write empty list to documents file if it should be cleared
-             try:
-                 with open(self.documents_path, 'w', encoding='utf-8') as f: json.dump([], f)
-                 logger.info(f"Wrote empty list to documents file: {self.documents_path}")
-             except IOError as ioe: logger.error(f"Failed to write empty documents file {self.documents_path}: {ioe}")
-             return
+
+        if self.index.ntotal <= 0 and not self.documents:
+            logger.info("Skipping save empty store.")
+            try:
+                with open(self.documents_path, 'w') as f:
+                    json.dump([], f)
+                logger.info("Wrote empty docs file.")
+            except IOError as e:
+                logger.error(f"Failed write empty docs file: {e}")
+            return
 
         try:
             self.index_path.parent.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Saving FAISS index to {self.index_path} ({self.index.ntotal} vectors)")
+            logger.info(f"Saving index {self.index_path} ({self.index.ntotal} vectors)")
             faiss.write_index(self.index, str(self.index_path))
 
-            logger.info(f"Saving {len(self.documents)} chunk documents to {self.documents_path}")
+            logger.info(f"Saving {len(self.documents)} chunk docs {self.documents_path}")
             with open(self.documents_path, 'w', encoding='utf-8') as f:
                 json.dump(self.documents, f, indent=2, ensure_ascii=False)
-            logger.info("FAISS index and chunk documents saved successfully.")
-        except IOError as ioe:
-             logger.error(f"Failed to write FAISS index or documents file: {ioe}", exc_info=True)
-        except Exception as e: # Catch other errors like Faiss runtime errors
-            logger.error(f"Failed to save FAISS index or documents: {e}", exc_info=True)
 
+            logger.info("Store saved successfully.")
+        except IOError as ioe:
+            logger.error(f"IOError saving store: {ioe}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Error saving store: {e}", exc_info=True)
 
     def _load_initial_documents(self):
-        """Loads initial documents, extracts text, and calls add_documents (which handles chunking)."""
-        # (Keep implementation from previous version - extraction logic is here)
+        """Loads initial documents, extracts text, and calls add_documents."""
         if self.index is None:
-             logger.warning("Cannot load initial documents: FAISS index not ready.")
-             return
-
-        initial_docs_to_process = [] # Stores dicts with full text for add_documents
-        processed_sources = set()
-
-        if self.documents_path.exists() and self.documents_path.is_file():
-             try:
-                with open(self.documents_path, 'r', encoding='utf-8') as f:
-                    existing_chunk_docs = json.load(f)
-                    if isinstance(existing_chunk_docs, list):
-                         # Get unique original sources from the chunk metadata
-                         processed_sources.update(doc.get('source') for doc in existing_chunk_docs if isinstance(doc, dict) and 'source' in doc)
-                         logger.info(f"Found {len(processed_sources)} unique sources in existing chunk documents file.")
-                    else:
-                         logger.warning(f"Chunk documents file {self.documents_path} does not contain a list.")
-             except json.JSONDecodeError as jde:
-                  logger.warning(f"Could not decode JSON from chunk documents file {self.documents_path}: {jde}")
-             except Exception as e:
-                  logger.warning(f"Could not read or parse existing chunk documents file {self.documents_path}: {e}")
-
-        # --- Text Extraction Functions --- (Copied from previous version)
-        def extract_text_from_pdf(file_path: Path) -> Optional[str]:
-            try:
-                import fitz
-                if not file_path.is_file(): return None
-                doc = fitz.open(file_path)
-                text = "".join(page.get_text() for page in doc).strip()
-                doc.close()
-                if not text: logger.warning(f"No text extracted from PDF: {file_path.name}")
-                logger.debug(f"Extracted text from PDF: {file_path.name} ({len(text)} chars)")
-                return text if text else None
-            except ImportError: logger.warning("PyMuPDF not installed. Cannot extract text from PDFs. Run 'pip install pymupdf'"); return None
-            except Exception as e: logger.error(f"Error extracting text from PDF {file_path.name}: {e}"); return None
-
-        def extract_text_from_csv(file_path: Path) -> Optional[str]:
-            try:
-                 import pandas as pd
-                 if not file_path.is_file(): return None
-                 # Add error handling for parsing specific to the error log
-                 df = pd.read_csv(file_path, on_bad_lines='warn') # Warn instead of error
-                 if df.empty:
-                      logger.warning(f"CSV file is empty or could not be parsed cleanly: {file_path.name}")
-                      return None
-                 # Simpler text conversion - join rows by newline, columns by space
-                 text = '\n'.join([' '.join(row.astype(str)) for _, row in df.iterrows()])
-                 logger.debug(f"Extracted text from CSV: {file_path.name} ({len(text)} chars)")
-                 return text.strip() if text.strip() else None
-            except ImportError: logger.warning("pandas not installed. Cannot extract text from CSVs. Run 'pip install pandas'"); return None
-            # Catch the specific pandas parsing error if 'warn' doesn't handle it fully
-            except pd.errors.ParserError as pe:
-                 logger.error(f"Pandas parsing error for CSV {file_path.name}: {pe}")
-                 return None
-            except Exception as e: logger.error(f"Error extracting text from CSV {file_path.name}: {e}"); return None
-        # --- End Text Extraction Functions ---
-
-        try:
-            policy_dir = settings.policies_dir
-            if policy_dir and policy_dir.exists() and policy_dir.is_dir():
-                logger.info(f"Scanning for new policy documents in {policy_dir}...")
-                count = 0
-                for policy_file in policy_dir.glob("*.pdf"):
-                    if policy_file.name not in processed_sources:
-                        text = extract_text_from_pdf(policy_file)
-                        if text:
-                             # Add the dict containing the *full* text here
-                             initial_docs_to_process.append({'text': text, 'source': policy_file.name, 'type': 'policy'})
-                             count += 1
-                        else: logger.warning(f"Skipping policy file due to extraction error or empty content: {policy_file.name}")
-                if count > 0: logger.info(f"Found {count} new policy documents to process.")
-
-            product_dir = settings.products_dir
-            if product_dir and product_dir.exists() and product_dir.is_dir():
-                logger.info(f"Scanning for new product documents in {product_dir}...")
-                count = 0
-                for product_file in product_dir.glob("*.csv"):
-                    if product_file.name not in processed_sources:
-                         text = extract_text_from_csv(product_file)
-                         if text:
-                             # Add the dict containing the *full* text here
-                             initial_docs_to_process.append({'text': text, 'source': product_file.name, 'type': 'product_update'})
-                             count += 1
-                         else: logger.warning(f"Skipping product file due to extraction error or empty content: {product_file.name}")
-                if count > 0: logger.info(f"Found {count} new product documents to process.")
-
-            # Pass the list of documents (with full text) to add_documents
-            if initial_docs_to_process:
-                logger.info(f"Passing {len(initial_docs_to_process)} new initial documents to add_documents for chunking and embedding.")
-                self.add_documents(initial_docs_to_process) # add_documents now handles chunking
-            else:
-                 logger.info("No new initial documents found or extracted successfully.")
-
-        except Exception as e:
-            logger.error(f"Failed during loading initial documents process: {e}", exc_info=True)
-
-
-    def add_documents(self, documents: List[Dict[str, str]]):
-        """
-        Chunks documents, gets embeddings for chunks, updates index, and saves metadata.
-        Aborts if embedding fails for any chunk derived from the input documents.
-        """
-        if not documents: logger.info("No documents provided to add."); return
-        if self.index is None: logger.error("Cannot add documents: FAISS index not initialized."); return
-        if not isinstance(documents, list) or not all(isinstance(doc, dict) for doc in documents): logger.error("Invalid input: Expected list of dicts."); return
-        if not all('text' in doc and isinstance(doc['text'], str) for doc in documents): logger.error("Invalid input: Docs must have 'text' field."); return
-        if self.feature_extractor is None: logger.error("Cannot add documents: Embedding pipeline not initialized."); return
-
-        chunks_to_embed = []        # List of chunk text strings
-        chunk_metadata_list = []    # List of metadata dicts corresponding to chunks
-
-        logger.info(f"Starting chunking process for {len(documents)} input documents...")
-        total_chunks_generated = 0
-        for i, doc in enumerate(documents):
-            original_text = doc.get('text', '').strip()
-            source = doc.get('source', f'Unknown_Doc_{i+1}')
-            doc_type = doc.get('type', 'document')
-
-            if not original_text:
-                logger.warning(f"Skipping document '{source}' because its text is empty.")
-                continue
-
-            # Generate chunks for the current document's text
-            doc_chunks = list(chunk_text(original_text, self.chunk_size, self.chunk_overlap))
-            if not doc_chunks:
-                 logger.warning(f"No chunks generated for document '{source}'. Text might be shorter than chunk size.")
-                 # Optionally add the whole text as one chunk if it's short?
-                 # if len(original_text) > 0: doc_chunks = [original_text] else: continue
-                 continue # Skip if no chunks generated
-
-            logger.debug(f"Generated {len(doc_chunks)} chunks for document '{source}'.")
-            total_chunks_generated += len(doc_chunks)
-
-            for chunk_index, chunk_text_content in enumerate(doc_chunks):
-                chunks_to_embed.append(chunk_text_content)
-                # Create metadata for this specific chunk
-                chunk_metadata = {
-                    "chunk_text": chunk_text_content, # Store the chunk text itself
-                    "source": source,                 # Original source file
-                    "type": doc_type,                 # Original document type
-                    "chunk_index": chunk_index,       # Index of this chunk within the original doc
-                    "total_chunks": len(doc_chunks)   # Total chunks for this original doc
-                    # index_id will be added after inserting into FAISS
-                }
-                chunk_metadata_list.append(chunk_metadata)
-
-        if not chunks_to_embed:
-            logger.warning("No valid text chunks generated from the input documents.")
+            logger.warning("Cannot load initial documents: FAISS index object is None.")
             return
 
-        logger.info(f"Generated a total of {total_chunks_generated} chunks. Attempting to embed...")
+        initial_docs = []
+        processed = set()
+
+        if self.documents_path.exists() and self.documents_path.is_file():
+            try:
+                with open(self.documents_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        processed.update(d.get('source') for d in data if isinstance(d, dict) and 'source' in d)
+                        logger.info(f"Found {len(processed)} sources in existing chunks.")
+            except Exception as e:
+                logger.warning(f"Could not read/parse existing chunks file {self.documents_path}: {e}")
+
+        def ext_pdf(fp: Path):
+            try:
+                import fitz
+                doc = fitz.open(fp)
+                txt = "".join(p.get_text() for p in doc).strip()
+                doc.close()
+                return txt or None
+            except ImportError:
+                logger.warning("PyMuPDF not installed.")
+                return None
+            except Exception as e:
+                logger.error(f"PDF Error {fp.name}: {e}")
+                return None
+
+        def ext_csv(fp: Path):
+            try:
+                import pandas as pd
+                df = pd.read_csv(fp, on_bad_lines='warn')
+                return '\n'.join([' '.join(r.astype(str)) for _, r in df.iterrows()]).strip() or None
+            except ImportError:
+                logger.warning("pandas not installed.")
+                return None
+            except pd.errors.ParserError as pe:
+                logger.error(f"CSV Parse Error {fp.name}: {pe}")
+                return None
+            except Exception as e:
+                logger.error(f"CSV Error {fp.name}: {e}")
+                return None
 
         try:
-            # Embed all chunks in one batch (if _get_embeddings handles batching well)
+            for d_set, ext, f_type in [
+                (settings.policies_dir, ext_pdf, "policy"),
+                (settings.products_dir, ext_csv, "product_update")
+            ]:
+                if d_set and d_set.exists() and d_set.is_dir():
+                    logger.info(f"Scanning {d_set}...")
+                    c = 0
+                    glob = "*.pdf" if f_type == "policy" else "*.csv"
+
+                    for f in d_set.glob(glob):
+                        if f.name not in processed:
+                            txt = ext(f)
+                            if txt:
+                                initial_docs.append({
+                                    'text': txt,
+                                    'source': f.name,
+                                    'type': f_type
+                                })
+                                c += 1
+                            else:
+                                logger.warning(f"Skipping {f_type} (extract err/empty): {f.name}")
+
+                    if c > 0:
+                        logger.info(f"Found {c} new {f_type} docs.")
+
+            if initial_docs:
+                logger.info(f"Passing {len(initial_docs)} new docs for chunking/embedding.")
+                self.add_documents(initial_docs)  # Call add_documents here
+            else:
+                logger.info("No new initial documents found/extracted.")
+        except Exception as e:
+            logger.error(f"Failed loading initial docs process: {e}", exc_info=True)
+
+    @log_execution_time
+    def add_documents(self, documents: List[Dict[str, str]]):
+        """Chunks documents, gets embeddings, updates index, saves chunk metadata."""
+        if self.index is None or self.chunker is None or self.feature_extractor is None:
+            logger.error(
+                "Cannot add documents: FAISSClient essential components (index, chunker, pipeline) are not ready.")
+            return
+
+        if not documents or not isinstance(documents, list):
+            logger.warning("No valid docs provided.")
+            return
+
+        chunks_to_embed = []
+        chunk_meta_list = []
+        total_chunks = 0
+        failed_docs = 0
+
+        logger.info(f"Chunking {len(documents)} input documents...")
+
+        for i, doc in enumerate(documents):
+            if not isinstance(doc, dict) or 'text' not in doc or not isinstance(doc['text'], str):
+                logger.warning(f"Skip invalid doc idx {i}.")
+                failed_docs += 1
+                continue
+
+            original_text = doc.get('text', '').strip()
+            source = doc.get('source', f'Unknown_{i + 1}')
+            doc_type = doc.get('type', 'doc')
+
+            if not original_text:
+                logger.warning(f"Skip empty doc '{source}'.")
+                failed_docs += 1
+                continue
+
+            doc_chunks = self.chunker.split_text(original_text)
+
+            if not doc_chunks:
+                logger.warning(f"No chunks for doc '{source}'.")
+                failed_docs += 1
+                continue
+
+            logger.debug(f"Generated {len(doc_chunks)} chunks for '{source}'.")
+            total_chunks += len(doc_chunks)
+
+            for chunk_idx, chunk_txt in enumerate(doc_chunks):
+                chunks_to_embed.append(chunk_txt)
+                chunk_meta_list.append({
+                    "chunk_text": chunk_txt,
+                    "source": source,
+                    "type": doc_type,
+                    "chunk_index": chunk_idx,
+                    "total_chunks": len(doc_chunks)
+                })
+
+        if failed_docs > 0:
+            logger.warning(f"Skipped {failed_docs} invalid/empty input documents.")
+
+        if not chunks_to_embed:
+            logger.warning("No valid text chunks generated.")
+            return
+
+        logger.info(f"Generated {total_chunks} total chunks. Embedding...")
+
+        try:
             embeddings = self._get_embeddings(chunks_to_embed)
 
             if embeddings is None:
-                 logger.error("Failed to get embeddings for the generated chunks. Aborting add operation.")
-                 # No changes made to index or self.documents yet
-                 return
-            # Shape validation done within _get_embeddings ensures embeddings match chunks_to_embed
+                logger.error("Embedding failed. Aborting add.")
+                return
 
             num_added = embeddings.shape[0]
-            start_index = self.index.ntotal # FAISS index position for the first new vector
+            start_idx = self.index.ntotal
+
             self.index.add(embeddings)
-            logger.info(f"Added {num_added} chunk embeddings to FAISS index. New total: {self.index.ntotal}")
+            logger.info(f"Added {num_added} chunk embeddings. New index total: {self.index.ntotal}")
 
-            # Add index_id to metadata and extend the main documents list
             for i in range(num_added):
-                # The order of embeddings matches chunk_metadata_list
-                chunk_metadata_list[i]["index_id"] = start_index + i
-            self.documents.extend(chunk_metadata_list) # self.documents now stores chunk metadata
+                chunk_meta_list[i]["index_id"] = start_idx + i
 
-            # Save the updated index and the chunk metadata
+            self.documents.extend(chunk_meta_list)
             self._save_store()
-
         except Exception as e:
-            # Catch potential Faiss errors during add or other unexpected issues
-            logger.error(f"Failed to add chunks/embeddings to FAISS index: {e}", exc_info=True)
-            # Recovery is difficult here. State might be inconsistent.
+            logger.error(f"Failed adding chunks/embeddings: {e}", exc_info=True)
 
+    @log_execution_time
+    def search(self, query: str, top_k: Optional[int] = None) -> Optional[List[Dict]]:
+        """Searches index for relevant chunks. Returns chunk metadata."""
+        if not self.is_initialized:
+            logger.error("FAISSClient not initialized. Cannot search.")
+            return None
 
-    def search(self, query: str) -> Optional[List[Dict]]:
-        """
-        Searches the index for relevant chunks based on query embedding.
-        Returns metadata of the relevant chunks.
-        """
-        if not query or not isinstance(query, str) or not query.strip(): logger.warning(f"Search query is invalid or empty: '{query}'"); return None
-        if self.index is None: logger.error("Search failed: FAISS index is not initialized."); return None
-        if self.index.ntotal == 0: logger.info("Search attempted on an empty index."); return []
-        if self.feature_extractor is None: logger.error("Search failed: Embedding pipeline not initialized."); return None
+        if not query or not isinstance(query, str) or not query.strip():
+            logger.warning(f"Invalid query: '{query}'")
+            return None
 
-        logger.info(f"Performing FAISS search for query: '{query[:100]}...'")
+        if self.index is None:
+            logger.error("Search failed: FAISS index is None.")
+            return None
+
+        if self.index.ntotal == 0:
+            logger.info("Search on empty index.")
+            return []
+
+        k_search = min(top_k if top_k is not None and top_k > 0 else self.k, self.index.ntotal)
+
+        if k_search <= 0:
+            logger.warning(f"Search k invalid/0. Cannot search.")
+            return []
+
+        logger.info(f"Searching for '{query[:100]}...' (k={k_search})")
+
         try:
-            start_time = time.monotonic()
-            query_embedding = self._get_embeddings([query.strip()])
+            start = time.monotonic()
+            query_emb = self._get_embeddings([query.strip()])  # Embed query
 
-            if query_embedding is None or query_embedding.shape != (1, self.dimension):
-                logger.error(f"Could not generate valid embedding for the search query. Shape: {query_embedding.shape if query_embedding is not None else 'None'}")
+            if query_emb is None or query_emb.shape != (1, self.dimension):
+                logger.error(f"Invalid query embedding.")
                 return None
 
-            k_search = min(self.k, self.index.ntotal)
-            if k_search <= 0: logger.warning(f"Search k invalid or 0 after clamping to index size. Cannot search."); return []
+            logger.debug(f"Searching index ({self.index.ntotal} chunks) k={k_search}")
+            distances, indices = self.index.search(query_emb, k_search)
+            duration = time.monotonic() - start
 
-            logger.debug(f"Searching index with {self.index.ntotal} vectors (chunks) for k={k_search}")
-            distances, indices = self.index.search(query_embedding, k_search)
-            duration = time.monotonic() - start_time
-            logger.info(f"FAISS search completed in {duration:.4f}s. Found {len(indices[0]) if indices is not None and len(indices) > 0 else 0} potential matches.")
+            logger.info(
+                f"Search completed {duration:.4f}s. Found {len(indices[0]) if indices is not None and len(indices) > 0 else 0} matches.")
 
             results = []
+
             if indices is not None and len(indices) > 0 and distances is not None and len(distances) > 0:
                 for i, idx in enumerate(indices[0]):
-                    if idx < 0: continue
+                    if idx < 0:
+                        continue
+
                     idx = int(idx)
 
                     if 0 <= idx < len(self.documents):
-                        # Retrieve the metadata for the relevant CHUNK
                         chunk_doc = self.documents[idx]
-                        if not isinstance(chunk_doc, dict): logger.warning(f"Retrieved chunk doc at index {idx} is not dict. Skipping."); continue
-
                         score = float(distances[0][i])
-                        # Return the chunk text and its associated metadata
                         results.append({
                             'score': score,
-                            'text': chunk_doc.get('chunk_text', ''), # Return the chunk text
-                            'source': chunk_doc.get('source', 'Unknown'),
-                            'type': chunk_doc.get('type', 'document'),
-                            'chunk_info': f"Chunk {chunk_doc.get('chunk_index', -1)+1}/{chunk_doc.get('total_chunks', -1)}" # Add chunk info
-                            # Consider adding index_id if needed downstream: 'index_id': idx
+                            'text': chunk_doc.get('chunk_text', ''),
+                            'source': chunk_doc.get('source', '?'),
+                            'type': chunk_doc.get('type', 'doc'),
+                            'chunk_info': f"Chunk {chunk_doc.get('chunk_index', -1) + 1}/{chunk_doc.get('total_chunks', -1)}"
                         })
                     else:
-                         logger.warning(f"Search returned index {idx} out of bounds for chunk documents (Max: {len(self.documents)-1}). Skipping.")
+                        logger.warning(f"Search index {idx} out of bounds (Max: {len(self.documents) - 1}).")
 
             return results
-
         except Exception as e:
             logger.error(f"FAISS search failed: {e}", exc_info=True)
             return None
 
 
-# Example Usage (for testing script directly):
+# --- Example Usage ---
 if __name__ == "__main__":
     print("Running FAISSClient script directly for testing...")
-
     try:
-        faiss_client = FAISSClient()
+        faiss_client = FAISSClient()  # Instantiation includes init checks now
 
-        if faiss_client.index is not None:
-            # Load initial docs check (if index was created anew)
-            if faiss_client.index.ntotal == 0 and not faiss_client.documents:
-                 print("\n--- Index is new, ensure initial documents were loaded/processed ---")
-                 # _load_initial_documents was called in __init__ if index was created there
+        if faiss_client.is_initialized:  # Check the flag
+            # Load initial docs is called during init if index is new
+            if faiss_client.index is not None and faiss_client.index.ntotal == 0:
+                print("\n--- Index is empty after init, check logs for loading/embedding issues ---")
 
-            # --- Test Search ---
             print("\n--- Testing search ---")
-            search_query = "investment policy" # Example query
-            search_results = faiss_client.search(search_query)
+            search_query = "investment policy"
+            search_results = faiss_client.search(search_query, top_k=5)
 
             if search_results is None:
-                 logger.error(f"Search failed for query: '{search_query}'")
+                logger.error(f"Search failed: '{search_query}'")
             elif search_results:
-                print(f"\nSearch Results for: '{search_query}'")
-                for result in search_results:
-                    if isinstance(result, dict):
-                         print(f"Source: {result.get('source', 'N/A')}, Type: {result.get('type', 'N/A')}, Score: {result.get('score', -1):.4f}")
-                         print(f"Chunk Info: {result.get('chunk_info', 'N/A')}")
-                         print(f"Text Preview (Chunk): {result.get('text', '')[:500]}...") # Show start of chunk
-                         print("---")
-                    else:
-                         logger.warning(f"Malformed result: {result}")
+                print(f"\nResults for '{search_query}' (Top {len(search_results)}):")
+                for r in search_results:
+                    print(
+                        f"Src:{r.get('source')}, Type:{r.get('type')}, Score:{r.get('score'):.4f}, Info:{r.get('chunk_info')}\nTxt:{r.get('text', '')[:300]}...\n---")
             else:
-                 print(f"\nNo relevant chunks found for: '{search_query}'")
-            # --------------------
+                print(f"\nNo relevant chunks found: '{search_query}'")
         else:
-             logger.error("FAISSClient initialization failed (index is None). Skipping tests.")
-
+            logger.error("FAISSClient did not initialize. Skipping tests.")
     except Exception as main_exc:
-         logger.error(f"Error during FAISSClient test run: {main_exc}", exc_info=True)
+        logger.error(f"Error during test run: {main_exc}", exc_info=True)
 
     print("\nFAISSClient script test finished.")

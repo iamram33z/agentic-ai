@@ -56,8 +56,8 @@ def _process_db_portfolio(client_id: str, raw_portfolio: dict) -> Optional[dict]
         client_display_name = fetched_name if fetched_name else client_id
 
         portfolio = {
-            "id": client_id,
-            "name": client_display_name,  # Use the fetched name with fallback
+            "client_id": client_id,  # Use 'client_id' key
+            "client_name": client_display_name,  # Use 'client_name' key
             "risk_profile": raw_portfolio.get('risk_profile', 'Not specified') or 'Not specified',
             "portfolio_value": float(raw_portfolio.get('total_value', 0.0)),
             "holdings": [],
@@ -119,11 +119,12 @@ def _process_db_portfolio(client_id: str, raw_portfolio: dict) -> Optional[dict]
         # Final validation before returning
         # Make sure validate_portfolio_data is imported/available
         if validate_portfolio_data(portfolio):
-            logger.debug(f"Successfully processed and aggregated portfolio for client {client_id}")
+            # Use the key from the dict we just created
+            logger.debug(f"Successfully processed and aggregated portfolio for client {portfolio['client_id']}")
             return portfolio
         else:
             logger.error(
-                f"Processed & Aggregated portfolio FAILED validation for client {client_id}. Data: {portfolio}")
+                f"Processed & Aggregated portfolio FAILED validation for client {portfolio['client_id']}. Data: {portfolio}")
             return None
 
     except Exception as e:
@@ -258,7 +259,7 @@ class AgentOrchestrator:
         self.agents: Dict[str, BaseAgent] = _initialize_agents()
         logger.info("Agent Orchestrator initialized.")
 
-    # --- Updated Portfolio Processing Method ---
+    # Prepare Client Context
 
     def _prepare_client_context(self, client_id: Optional[str], client_context_from_ui: Optional[dict]) -> Optional[dict]:
         """Loads, validates, and prepares client context dictionary."""

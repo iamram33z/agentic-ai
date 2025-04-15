@@ -1,145 +1,204 @@
 # config.py
 
-# Importing necessary libraries
 import sys
+import os # Added for robust key loading message
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 from pydantic_settings import BaseSettings, SettingsConfigDict
-# HttpUrl might not be needed anymore if not used elsewhere
-# from pydantic import Field, PostgresDsn, HttpUrl
-from pydantic import Field, PostgresDsn
+from pydantic import Field, NonNegativeInt, PostgresDsn, DirectoryPath, FilePath, validator, PositiveInt, \
+    NonNegativeFloat
 from dotenv import load_dotenv
+import logging # Added for early logging
 
-# Load .env file from the root of the 'fintech-ai-bot' directory
-# Use resolve() for robustness, ensure correct parent levels based on file location
-# Assuming config.py is in src/fintech_ai_bot/config.py
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
+# --- Early Logger Setup (for config loading issues) ---
+# Basic config before settings are loaded
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s in %(module)s: %(message)s', datefmt="%Y-%m-%d %H:%M:%S")
+config_logger = logging.getLogger(__name__)
 
+# --- Project Root Setup ---
+try:
+    # Assuming config.py is in src/fintech_ai_bot/config.py
+    # Adjust parent calls if your structure is different
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+except NameError:
+    # Fallback for environments where __file__ might not be defined (e.g., some notebooks)
+    PROJECT_ROOT = Path(".").resolve()
+    config_logger.warning(f"__file__ not defined, setting PROJECT_ROOT to current working directory: {PROJECT_ROOT}")
+
+# --- Load .env ---
+dotenv_path = PROJECT_ROOT / ".env"
+if dotenv_path.exists():
+    load_dotenv(dotenv_path=dotenv_path)
+    config_logger.info(f"Loaded environment variables from: {dotenv_path}")
+else:
+    config_logger.warning(f".env file not found at expected location: {dotenv_path}")
+
+# --- Model Definitions ---
 class AgentModelConfig(BaseSettings):
-    id: str = "llama3-8b-8192"
-    temperature: float = 0.5
-    max_tokens: int = 1000
+    """Configuration for LLM agent models."""
+    id: str = "llama3-8b-8192"  # Default model ID
+    temperature: NonNegativeFloat = 0.5
+    max_tokens: PositiveInt = 1000
 
+# --- Main Settings Class ---
 class Settings(BaseSettings):
-    # Project directories
-    project_root: Path = Field(default=PROJECT_ROOT)
-    log_dir: Path = Field(default=PROJECT_ROOT / "logs")
-    faiss_dir: Path = Field(default=PROJECT_ROOT / "faiss")
-    data_dir: Path = Field(default=PROJECT_ROOT / "data")
-    # Derived paths will be set in __init__
-    faiss_index_path: Path | None = None
-    faiss_docs_path: Path | None = None
-    policies_dir: Path | None = None
-    products_dir: Path | None = None
+    """Main application settings, loaded from environment variables and .env file."""
 
-    # Logging
-    log_level: str = "INFO"
+    # --- Core Paths ---
+    project_root: DirectoryPath = Field(default=PROJECT_ROOT)
+    log_dir: Path = Field(default=PROJECT_ROOT / "logs") # Path object, validated in __init__
+    faiss_dir: Path = Field(default=PROJECT_ROOT / "faiss") # Path object, validated in __init__
+    data_dir: Path = Field(default=PROJECT_ROOT / "data")   # Path object, validated in __init__
 
-    # Database settings
-    azure_pg_host: str | None = None
-    azure_pg_db: str | None = None
-    azure_pg_user: str | None = None
-    azure_pg_password: str | None = None
-    azure_pg_ssl: str = "require"
-    azure_pg_schema: str = "profiles"
-    db_connection_string: Optional[PostgresDsn] = None
-    db_max_retries: int = 3
-    db_retry_delay: float = 1.0
+    # Derived paths (set in __init__)
+    faiss_index_path: Optional[Path] = None
+    faiss_docs_path: Optional[Path] = None
+    policies_dir: Optional[Path] = None
+    products_dir: Optional[Path] = None
 
-    # Vector database settings (using local pipeline)
-    hf_api_key: str | None = Field(default=None,
-                                   validation_alias="HUGGINGFACE_API_KEY")  # Still useful for authenticated downloads
-    embedding_model_name: str = "sentence-transformers/all-mpnet-base-v2"
-    embedding_dimension: int = 768
-    # embedding_api_url: Optional[HttpUrl] = None # Removed: No longer needed for local pipeline
-    # embedding_request_timeout: int = 15      # Removed: No longer needed for local pipeline
-    vector_search_k: int = 3                   # Number of relevant docs to retrieve
+    # --- Logging ---
+    log_level: str = "INFO" # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
 
-    # Agent Models
-    # Configuration for different agent models
-    news_agent_model: AgentModelConfig = AgentModelConfig(
-        id="llama3-8b-8192", temperature=0.4, max_tokens=1000
-    )
-    financial_agent_model: AgentModelConfig = AgentModelConfig(
-        id="llama3-8b-8192", temperature=0.1, max_tokens=1000
-    )
-    coordinator_agent_model: AgentModelConfig = AgentModelConfig(
-        id="llama3-8b-8192",
-        temperature=0.2,
-        max_tokens=4000,
-    )
+    # --- Database (PostgreSQL) ---
+    azure_pg_host: Optional[str] = None
+    azure_pg_db: Optional[str] = None
+    azure_pg_user: Optional[str] = None
+    azure_pg_password: Optional[str] = Field(default=None, repr=False) # Prevent logging password
+    azure_pg_ssl: str = "require" # Default SSL mode for Azure PG
+    azure_pg_schema: str = "profiles" # Default DB schema
+    db_connection_string: Optional[PostgresDsn] = None # Set in __init__
+    db_max_retries: PositiveInt = 3
+    db_retry_delay: NonNegativeFloat = 1.0 # Seconds
 
-    # Agent settings
-    max_holdings_in_prompt: int = 10
-    # Max approx characters from retrieved docs to include in agent context (adjust multiplier as needed)
-    max_doc_chars_in_prompt: int = 5000 * 5
-    max_financial_summary_len: int = 500  # Target token length for financial agent summary
-    max_news_summary_len: int = 600       # Target token length for news agent summary
-    max_symbols_to_fetch: int = 10        # Max stock symbols to fetch news/data for at once
-    financial_api_delay: float = 0.2      # Delay between financial API calls (e.g., yfinance)
+    # --- Vector Store (FAISS + Local Embeddings) ---
+    hf_api_key: Optional[str] = Field(default=None, validation_alias="HUGGINGFACE_API_KEY", repr=False) # For model download auth
+    embedding_model_name: str = "sentence-transformers/all-mpnet-base-v2" # HF model ID
+    embedding_dimension: PositiveInt = 768 # Must match model output dim (all-mpnet-base-v2 is 768)
+    vector_search_k: PositiveInt = 3 # Number of relevant chunks to retrieve
 
-    # Streamlit settings
+    # NEW: Token-based chunking settings
+    chunk_size_tokens: PositiveInt = 450 # Target chunk size in tokens (must be <= model max length)
+    chunk_overlap_tokens: NonNegativeInt = 50 # Overlap between chunks in tokens
+    embedding_batch_size: PositiveInt = 32 # Number of chunks to embed in one go
+
+    # --- Agent Models ---
+    news_agent_model: AgentModelConfig = AgentModelConfig(id="llama3-8b-8192", temperature=0.4, max_tokens=1000)
+    financial_agent_model: AgentModelConfig = AgentModelConfig(id="llama3-8b-8192", temperature=0.1, max_tokens=1000)
+    coordinator_agent_model: AgentModelConfig = AgentModelConfig(id="llama3-8b-8192", temperature=0.2, max_tokens=4000)
+
+    # --- Agent Logic ---
+    max_holdings_in_prompt: PositiveInt = 10 # Limit number of holdings shown to LLM
+    # Max *characters* from retrieved doc chunks to include in agent context
+    # Estimate based on avg token length if needed, e.g., 5000 tokens * ~5 chars/token
+    max_doc_chars_in_prompt: PositiveInt = 25000
+    max_financial_summary_len: PositiveInt = 500 # Target max tokens for financial summary
+    max_news_summary_len: PositiveInt = 600 # Target max tokens for news summary
+    max_symbols_to_fetch: PositiveInt = 10 # Limit for parallel external API calls (e.g., yfinance)
+    financial_api_delay: NonNegativeFloat = 0.2 # Seconds delay between API calls
+
+    # --- Streamlit UI ---
     app_title: str = "FinTech AI Advisor"
     app_icon: str = "💹"
     app_description: str = "Your AI partner for financial insights and portfolio analysis."
     user_avatar: str = "🧔🏻‍♂️"
     assistant_avatar: str = "🪼"
-    cache_ttl_seconds: int = 300          # Cache time for Streamlit functions
+    cache_ttl_seconds: PositiveInt = 300 # Cache duration for Streamlit functions
 
+    # --- Pydantic Model Config ---
     model_config = SettingsConfigDict(
-        env_file=PROJECT_ROOT / '.env',
+        env_file=dotenv_path if dotenv_path.exists() else None, # Load .env if found
         env_file_encoding='utf-8',
-        extra='ignore',                   # Ignore extra fields from .env
-        validate_assignment=True          # Validate fields on assignment
+        extra='ignore', # Ignore extra environment variables
+        validate_assignment=True # Validate on attribute assignment
     )
 
-    # Using __init__ and post-init logic for derived fields
+    # --- Initialization and Validation ---
     def __init__(self, **values):
         super().__init__(**values)
-        # Construct derived paths after initial loading
+        # --- Resolve and Validate Paths ---
         # Ensure base directories are Path objects before joining
-        self.faiss_dir = Path(self.faiss_dir)
-        self.data_dir = Path(self.data_dir)
-        self.log_dir = Path(self.log_dir)
+        self.log_dir = Path(self.log_dir).resolve()
+        self.faiss_dir = Path(self.faiss_dir).resolve()
+        self.data_dir = Path(self.data_dir).resolve()
 
+        # Create derived paths
         self.faiss_index_path = self.faiss_dir / "faiss_index"
         self.faiss_docs_path = self.faiss_dir / "documents.json"
         self.policies_dir = self.data_dir / "policies"
         self.products_dir = self.data_dir / "products"
 
-        # Construct DB connection string if Azure details are present
+        # --- Construct DB Connection String ---
+        self._construct_db_connection_string()
+
+        # --- Initial Log Messages ---
+        # Log key paths being used
+        config_logger.info(f"Project Root: {self.project_root}")
+        config_logger.info(f"Log Directory: {self.log_dir}")
+        config_logger.info(f"FAISS Directory: {self.faiss_dir}")
+        config_logger.info(f"Data Directory: {self.data_dir}")
+        # Log DB connection status (avoid logging the string itself)
+        config_logger.info(f"DB Connection String Set: {'Yes' if self.db_connection_string else 'No'}")
+        # Log HF API Key status without exposing the key
+        hf_key_status = "Not Set"
+        if self.hf_api_key: hf_key_status = "Set (Loaded)"
+        elif os.getenv("HUGGINGFACE_API_KEY"): hf_key_status = "Set (Env Var)"
+        config_logger.info(f"Hugging Face API Key Status: {hf_key_status}")
+
+    def _construct_db_connection_string(self):
+        """Helper to construct the DB connection string."""
         if self.azure_pg_user and self.azure_pg_password and self.azure_pg_host:
             db_path = f"/{self.azure_pg_db}" if self.azure_pg_db else ""
             conn_str = f"postgresql://{self.azure_pg_user}:{self.azure_pg_password}@{self.azure_pg_host}:5432{db_path}?sslmode={self.azure_pg_ssl}"
             try:
                 self.db_connection_string = PostgresDsn(conn_str)
             except Exception as e:
-                 print(f"WARNING: Error constructing/validating DB connection string: {e}", file=sys.stderr)
+                 config_logger.warning(f"Error constructing/validating DB connection string: {e}")
                  self.db_connection_string = None
         else:
-            if self.azure_pg_host or self.azure_pg_user or self.azure_pg_db:
-                 print("WARNING: Partial Azure PostgreSQL connection details provided. Full details (host, user, password) are required.", file=sys.stderr)
+            # Warn only if some Azure details were provided but not all required ones
+            if self.azure_pg_host or self.azure_pg_user or self.azure_pg_db or self.azure_pg_password:
+                 config_logger.warning("Partial Azure PG details provided. Host, User, Password required.")
             self.db_connection_string = None
 
-# Instantiate settings globally
-settings = Settings()
+# --- Instantiate Settings Globally ---
+try:
+    settings = Settings()
+    config_logger.info("Settings loaded successfully.")
+except Exception as e:
+    config_logger.critical(f"Failed to initialize Settings: {e}", exc_info=True)
+    # Provide minimal fallback settings if critical failure during init
+    settings = Settings( # Use default values which might allow parts of app to run
+        azure_pg_host=None, azure_pg_user=None, azure_pg_password=None, azure_pg_db=None,
+        hf_api_key=None
+    )
+    config_logger.warning("Initialized with minimal fallback settings.")
 
-# Add checks after initialization
-# These checks run when the module is imported
-if not settings.db_connection_string:
-    print("WARNING: Database connection string could not be constructed or is missing/incomplete. DB operations will fail.", file=sys.stderr)
+# --- Post-Initialization Checks ---
+# These run when the config module is imported elsewhere
 
-if not settings.hf_api_key:
-    print("WARNING: Hugging Face API key (HUGGINGFACE_API_KEY) not found. Model download might fail if the model isn't cached locally or if it's a private/gated model.", file=sys.stderr)
-
-# Create log directory if it doesn't exist (using the path derived in __init__)
-# Check log_dir directly from the settings instance
+# Log directory creation check (moved here from original location)
 if not settings.log_dir.exists():
     try:
         settings.log_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Log directory created at: {settings.log_dir}")
+        config_logger.info(f"Log directory created at: {settings.log_dir}")
     except Exception as e:
-        print(f"ERROR: Could not create log directory at {settings.log_dir}: {e}", file=sys.stderr)
+        config_logger.error(f"Could not create log directory at {settings.log_dir}: {e}", exc_info=True)
 elif not settings.log_dir.is_dir():
-     print(f"ERROR: Path exists but is not a directory: {settings.log_dir}", file=sys.stderr)
+     config_logger.error(f"Log path exists but is not a directory: {settings.log_dir}")
+
+# Database connection warning
+if not settings.db_connection_string:
+    config_logger.warning("DB connection string not configured. Database operations will fail.")
+
+# Hugging Face API key warning
+if not settings.hf_api_key and not os.getenv("HUGGINGFACE_API_KEY"):
+    config_logger.warning("Hugging Face API key (HUGGINGFACE_API_KEY) not found in env or .env. Model download might fail if private/gated or not cached.")
+
+# Embedding dimension check (example)
+if settings.embedding_model_name == "sentence-transformers/all-mpnet-base-v2" and settings.embedding_dimension != 768:
+     config_logger.warning(f"Configured embedding dimension {settings.embedding_dimension} does not match standard 768 for {settings.embedding_model_name}.")
+elif settings.embedding_model_name == "sentence-transformers/all-MiniLM-L6-v2" and settings.embedding_dimension != 384:
+     config_logger.warning(f"Configured embedding dimension {settings.embedding_dimension} does not match standard 384 for {settings.embedding_model_name}.")
+# Add more checks as needed
+
+config_logger.debug("Config module loaded.")
