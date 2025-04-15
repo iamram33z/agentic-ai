@@ -94,7 +94,7 @@ def display_portfolio_summary(portfolio_data: Dict):
         total_value = portfolio_data.get('portfolio_value', 0.0)
         risk_profile_raw = portfolio_data.get('risk_profile')
         risk_profile = risk_profile_raw.capitalize() if risk_profile_raw and isinstance(risk_profile_raw, str) else 'N/A'
-        client_name = portfolio_data.get('name', 'Client') # Get name for context
+        client_name = portfolio_data.get('client_name', 'Client')
 
         st.subheader(f"Portfolio Summary of {client_name}") # More specific title
         col1, col2 = st.columns(2)
@@ -247,7 +247,7 @@ def manage_sidebar(db_client: PostgresClient):
                             # Successfully loaded and processed
                             st.session_state.client_context = portfolio
                             st.session_state.portfolio_loaded = True
-                            client_name = portfolio.get('name', validated_id) # Use name from processed portfolio
+                            client_name = portfolio.get('client_name', validated_id) # Use 'client_name' key
                             logger.info(f"Portfolio context loaded successfully for {client_name} ({validated_id})")
                             st.toast(f"Loaded data for {client_name}", icon="✅")
                             # No rerun needed here, form submission handles it
