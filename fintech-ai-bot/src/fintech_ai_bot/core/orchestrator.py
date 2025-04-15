@@ -409,15 +409,15 @@ class AgentOrchestrator:
             search_results = self.vector_store_client.search(query)
             if not search_results: logger.info("No relevant documents found."); return None
             formatted_docs = ["**Context from Knowledge Base (Excerpt)**"]; doc_text_aggregate = ""
-            current_token_count = 0; max_tokens = settings.max_doc_tokens_in_prompt
+            current_char_count = 0; max_chars = settings.max_doc_chars_in_prompt
             for i, res in enumerate(search_results, 1):
                 source = res.get('source', 'Unk'); doc_type = res.get('type', 'doc').title()
                 text_excerpt = res.get('text', ''); excerpt_tokens = estimate_token_count(text_excerpt)
                 doc_entry_overhead = estimate_token_count(f"\n📄 **Doc {i} ({doc_type}) - Src: {source}**\n\n---")
-                if current_token_count + excerpt_tokens + doc_entry_overhead < max_tokens:
+                if current_char_count + excerpt_tokens + doc_entry_overhead < max_chars:
                     doc_entry = f"\n📄 **Doc {i} ({doc_type}) - Src: {source}**\n{text_excerpt}\n---"
-                    doc_text_aggregate += doc_entry; current_token_count += excerpt_tokens + doc_entry_overhead
-                else: logger.warning(f"Doc inclusion token limit ({max_tokens}) reached."); break
+                    doc_text_aggregate += doc_entry; current_char_count += excerpt_tokens + doc_entry_overhead
+                else: logger.warning(f"Doc inclusion token limit ({max_chars}) reached."); break
             if not doc_text_aggregate: return None
             formatted_docs.append(doc_text_aggregate.strip()); return "\n".join(formatted_docs)
         except Exception as e: logger.error(f"Vector search/format failed: {e}", exc_info=True); return "⚠️ Error retrieving/formatting docs."
